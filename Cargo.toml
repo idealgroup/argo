@@ -8,7 +8,6 @@ default = ["groth16"]
 groth16 = ["dep:ark-groth16"]
 
 [dependencies]
-rand = "0.9.2"
 ark-ff = "0.6.0"
 ark-ec = "0.6.0"
 ark-std = { version = "0.6.0", features = [ "getrandom" ]}
@@ -20,7 +19,6 @@ blake3 = "1.8.2"
 aes = "0.8.4"
 derive_more = { version = "2.1.0", features = [ "from", "deref" ]}
 num-bigint = "0.4.6"
-rayon = "1.11.0"
 thiserror = "2.0.18"
 arrayvec = "0.7.6"
 rustc-hash = "2.1.1"
@@ -29,6 +27,7 @@ ark-groth16 = { version = "0.6.0", default-features = false, optional = true }
 [dev-dependencies]
 criterion = "0.7.0"
 mimalloc = "0.1.48"
+rayon = "1.11.0"
 ark-groth16 = "0.6.0"
 ark-relations = "0.6.0"
 ark-snark = "0.6.0"
