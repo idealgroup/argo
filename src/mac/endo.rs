@@ -291,7 +291,11 @@ impl<G: GLVConfig> EndoScalar<G> {
     }
 
     fn mod_sum(endoscalars: &[Self]) -> Self {
-        Self::from_u8(endoscalars.iter().map(|phi| phi.as_u8()).sum::<u8>() % (ENDO_SIZE as u8))
+        let sum = endoscalars
+            .iter()
+            .map(|phi| phi.as_u8() as usize)
+            .sum::<usize>();
+        Self::from_u8((sum % ENDO_SIZE) as u8)
     }
 }
 
@@ -300,13 +304,8 @@ where
     G: GLVConfig + Clone,
 {
     fn neg(&self) -> Self {
-        match self {
-            Self::NegInf(_) => self.clone(),
-            _ => {
-                let modulus = ENDO_SIZE as u8;
-                Self::from_u8((modulus - self.as_u8()) % modulus)
-            }
-        }
+        let modulus = ENDO_SIZE as u8;
+        Self::from_u8((modulus - self.as_u8()) % modulus)
     }
 
     fn checksum(endoscalars: &[Self]) -> Self {
@@ -583,4 +582,29 @@ fn test_gt_mac_commute() {
     let gt_mac = gt_mac_key.encode(&gt_point);
 
     assert_eq!(*gt_mac, Bn254::pairing(*g1_mac, G2Affine::generator()).0)
+}
+
+#[test]
+/// Erasing any digit, including an erased 1 (whose recovery computes -6) and
+/// sums that overflow u8, must recover the original checksummed array.
+fn test_checksum_single_erasure() {
+    type E = EndoScalar<g2::Config>;
+
+    for digit in 0..ENDO_SIZE as u8 {
+        let mut original = vec![E::from_u8(6); KAPPA_B - 1];
+        original[0] = E::from_u8(digit);
+        original.push(E::checksum(&original));
+
+        for missing in 0..KAPPA_B {
+            let mut erased: Vec<_> = original
+                .iter()
+                .map(|phi| Some(phi.as_u8() as usize))
+                .collect();
+            erased[missing] = None;
+            assert!(
+                E::decode(&erased).unwrap() == original,
+                "digit {digit}, erased {missing}"
+            );
+        }
+    }
 }
