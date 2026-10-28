@@ -5,7 +5,7 @@ use ark_ec::{AffineRepr, pairing::Pairing, short_weierstrass::Affine};
 use ark_ff::{BigInt, PrimeField};
 use rand_core::CryptoRngCore;
 
-use crate::utils::error::EvalError;
+use crate::utils::{aes_hash::LEN_PER_BASE_ELEM, error::EvalError};
 
 /// `Bn254::multi_pairing` without its panic on a zero Miller loop output,
 /// which points decoded from a malformed table can cause.
@@ -51,14 +51,16 @@ fn to_u64_array<const N: usize>(bytes: &[u8]) -> [u64; N] {
     result
 }
 
+/// The input length is fixed because the conversion splits at the 17-byte
+/// offsets above.
 pub trait FromLeBytesModOrder {
-    fn from_le_bytes_mod_order(bytes: &[u8]) -> Self;
+    fn from_le_bytes_mod_order(bytes: &[u8; LEN_PER_BASE_ELEM]) -> Self;
 }
 
 impl FromLeBytesModOrder for Fq {
     /// Optimized implementation of from_le_bytes_mod_order for Bn254::Fq
     #[inline]
-    fn from_le_bytes_mod_order(bytes: &[u8]) -> Fq {
+    fn from_le_bytes_mod_order(bytes: &[u8; LEN_PER_BASE_ELEM]) -> Fq {
         let num_modulus_bytes = Fq::MODULUS_BIT_SIZE.div_ceil(8) as usize;
         let num_bytes_to_directly_convert = ark_std::cmp::min(num_modulus_bytes - 1, bytes.len());
 
@@ -91,7 +93,7 @@ impl FromLeBytesModOrder for Fr {
     /// Optimized implementation of from_le_bytes_mod_order for Bn254::Fr
     /// FIXME test more cases?!
     #[inline]
-    fn from_le_bytes_mod_order(bytes: &[u8]) -> Fr {
+    fn from_le_bytes_mod_order(bytes: &[u8; LEN_PER_BASE_ELEM]) -> Fr {
         let num_modulus_bytes = Fr::MODULUS_BIT_SIZE.div_ceil(8) as usize;
         let num_bytes_to_directly_convert = ark_std::cmp::min(num_modulus_bytes - 1, bytes.len());
 
