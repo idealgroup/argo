@@ -81,6 +81,12 @@ impl DeriveOutputMacKey<AesCtr, bool, bool, Bit16ByteMac, Bit16ByteMac> for Bit1
     }
 }
 
+impl Table<AesCtr, Bit16ByteMac, Bit16ByteMac> {
+    pub(crate) fn has_garbled_shape(&self) -> bool {
+        self.gid.is_none()
+    }
+}
+
 /// A bit adaptor table mapping from a Bit16ByteMac to a Bit16ByteMac.
 impl Circuit<bool, Bit16ByteMac, bool, Bit16ByteMac> for Table<AesCtr, Bit16ByteMac, Bit16ByteMac> {
     type Aux = [u8; 16];
@@ -190,6 +196,7 @@ fn test_aes_ctr_bytes_to_bytes_adaptor() {
         .unwrap();
         aes_ctr_clear_set();
         super::super::clear_set();
+        assert!(garbling_table.has_garbled_shape());
 
         let input = Bit16ByteMac::random_input(&mut rng);
         let input_mac = input_mac_key.encode(&input);

@@ -48,6 +48,17 @@ where
     }
 }
 
+impl<G> Table<AesCtr, Bit16ByteMac, BitGroupMac<G>>
+where
+    G: Field + Random,
+    G::BasePrimeField: FromLeBytesModOrder,
+{
+    /// Whether the ciphertext holds exactly one encrypted `G`.
+    pub(crate) fn has_garbled_shape(&self) -> bool {
+        self.gid.is_none() && self.ciphertext.len() == AesCtr::num_blocks::<G>() * AES_BLOCK_SIZE
+    }
+}
+
 /// A bit adaptor table mapping from a Bit16ByteMac to a BitGroupMac.
 impl<G> Circuit<bool, Bit16ByteMac, bool, BitGroupMac<G>>
     for Table<AesCtr, Bit16ByteMac, BitGroupMac<G>>
@@ -248,6 +259,7 @@ where
             .unwrap();
         aes_ctr_clear_set();
         super::clear_set();
+        assert!(garbling_table.has_garbled_shape());
 
         let input = Bit16ByteMac::random_input(&mut rng);
         let input_mac = input_mac_key.encode(&input);

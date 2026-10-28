@@ -63,6 +63,12 @@ pub(crate) struct Table {
     bit_adaptor: bit_adaptor::Table<AesMiTCCR, Bit16ByteMac, Bit16ByteMac>,
 }
 
+impl Table {
+    pub(crate) fn has_garbled_shape(&self, gid: &GID) -> bool {
+        self.gid == *gid && self.bit_adaptor.has_garbled_shape(gid)
+    }
+}
+
 impl Circuit<Input, InputMac, bool, OutputMac> for Table {
     type Aux = GID;
 
@@ -161,6 +167,7 @@ fn test_and_circuit() {
         let (circuit, output_mac_key) =
             Table::garble(&mut Nonce::new(), &mut rng, Some(gid), &input_mac_key).unwrap();
         clear_set();
+        assert!(circuit.has_garbled_shape(&gid));
 
         let output_mac = circuit
             .evaluate(&mut Nonce::new(), &input, &input_mac)

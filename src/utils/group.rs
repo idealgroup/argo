@@ -1,9 +1,22 @@
 use std::sync::LazyLock;
 
-use ark_bn254::{Fq, Fq2, Fr, g2};
-use ark_ec::{AffineRepr, short_weierstrass::Affine};
+use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, g2};
+use ark_ec::{AffineRepr, pairing::Pairing, short_weierstrass::Affine};
 use ark_ff::{BigInt, PrimeField};
 use ark_std::rand::rngs::StdRng;
+
+use crate::utils::error::EvalError;
+
+/// `Bn254::multi_pairing` without its panic on a zero Miller loop output,
+/// which points decoded from a malformed table can cause.
+pub(crate) fn checked_multi_pairing(
+    a: impl IntoIterator<Item = impl Into<<Bn254 as Pairing>::G1Prepared>>,
+    b: impl IntoIterator<Item = impl Into<<Bn254 as Pairing>::G2Prepared>>,
+) -> Result<Fq12, EvalError> {
+    Bn254::final_exponentiation(Bn254::multi_miller_loop(a, b))
+        .map(|output| output.0)
+        .ok_or(EvalError::DegeneratePairing)
+}
 
 /// A 17-byte offset in Bn254::Fq, i.e. Fq(2^{8 * 17})
 /// Used in optimised from_le_bytes_mod_order for hash_to_field

@@ -25,6 +25,7 @@ use ark_std::{
 
 use super::*;
 use crate::{
+    garble::bivariate::Monomial,
     garble::keys::{a_ec_mac_key, b_mac_key},
     mac::endo::{Endo, EndoMacKey, PSqModR},
     utils::error::InputError,
@@ -90,13 +91,14 @@ fn fixture() -> &'static Fixture {
         let zero_proof = prove(0, 7);
 
         let verifier_key = VerifierKey::from_groth16(&vk, &[PublicInput::Garbled]).unwrap();
-        assert_eq!(verifier_key.pairing(&proof), Fq12::ONE);
-        assert_eq!(verifier_key.pairing(&zero_proof), Fq12::ONE);
+        assert_eq!(verifier_key.pairing(&proof).unwrap(), Fq12::ONE);
+        assert_eq!(verifier_key.pairing(&zero_proof).unwrap(), Fq12::ONE);
 
         let secret = Fq::rand(&mut rng);
         let input_mac_key = InputMacKey::random_key(&mut rng);
         let gid = GID::random(&mut rng);
         let table = garble_groth16(SEED, secret, verifier_key, &input_mac_key, gid).unwrap();
+        assert!(table.has_garbled_shape());
 
         let keys = garbler_keys();
         assert_replayed_keys(&table, &input_mac_key, &keys, &proof);
@@ -334,7 +336,10 @@ fn malformed_proofs_reveal_secret() {
         x: [Fr::new_unchecked(Fr::MODULUS)],
         ..f.zero_proof
     };
-    assert_eq!(f.table.verifier_key.pairing(&non_canonical_x), Fq12::ONE);
+    assert_eq!(
+        f.table.verifier_key.pairing(&non_canonical_x).unwrap(),
+        Fq12::ONE
+    );
 
     let mut cases = vec![("x = r", non_canonical_x)];
     for (name, input) in [
@@ -501,6 +506,7 @@ fn garble_with<const N: usize>(
     let input_mac_key = InputMacKey::random_key(rng);
     let gid = GID::random(rng);
     let table = garble_groth16(seed, secret, verifier_key, &input_mac_key, gid).unwrap();
+    assert!(table.has_garbled_shape());
     (secret, input_mac_key, table)
 }
 
@@ -516,8 +522,8 @@ fn constant_inputs_change_per_garbling() {
     let vk1 = VerifierKey::<0>::from_groth16(&vk, &constant(inputs1)).unwrap();
     let vk2 = VerifierKey::<0>::from_groth16(&vk, &constant(inputs2)).unwrap();
     let (proof1, proof2) = (proof_input(&proof1, []), proof_input(&proof2, []));
-    assert_eq!(vk1.pairing(&proof1), Fq12::ONE);
-    assert_eq!(vk2.pairing(&proof2), Fq12::ONE);
+    assert_eq!(vk1.pairing(&proof1).unwrap(), Fq12::ONE);
+    assert_eq!(vk2.pairing(&proof2).unwrap(), Fq12::ONE);
 
     let (secret1, key1, table1) = garble_with(&mut rng, SEED, vk1);
     let (secret2, key2, table2) = garble_with(&mut rng, SEED + 1, vk2);
@@ -772,4 +778,91 @@ fn non_canonical_bits_without_garbled_inputs() {
         let bits = with_component(&valid, index, plus_one);
         assert_eq!(evaluate_raw(&table, &key, &bits).unwrap(), secret);
     }
+}
+
+fn serialize<const N: usize>(table: &Table<N>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    table.serialize_compressed(&mut bytes).unwrap();
+    bytes
+}
+
+fn deserialize(bytes: &[u8]) -> Table {
+    Table::deserialize_compressed(bytes).unwrap()
+}
+
+/// Hidden tables come from the garbler unopened, so one that deserializes
+/// but has the wrong shape must be rejected rather than evaluated.
+#[test]
+fn malformed_tables_are_rejected() {
+    let f = fixture();
+    let bytes = serialize(&f.table);
+    for len in [0, 1, bytes.len() / 2, bytes.len() - 1] {
+        assert!(Table::<1>::deserialize_compressed(&bytes[..len]).is_err());
+    }
+
+    type Mutation = (&'static str, fn(&mut Table));
+    let mutations: [Mutation; 8] = [
+        ("C converter replica dropped", |t| {
+            t.c_ec_mac.x.pop();
+        }),
+        ("Y tables on a compact converter", |t| {
+            t.b_ec_mac.y = Some(Vec::new())
+        }),
+        ("doubling ciphertext dropped", |t| {
+            t.a_ec_mac.doubling.pop();
+        }),
+        ("polynomial term dropped", |t| {
+            t.c_ec_mac.z[0].tables.pop();
+        }),
+        ("monomial changed", |t| {
+            t.a_ec_mac.x[0].tables[0].1 = Monomial::new(200, 200)
+        }),
+        ("scalar bit adaptor dropped", |t| {
+            t.x_G[0].adaptors.pop();
+        }),
+        ("bit adaptor ciphertext truncated", |t| {
+            t.x_G[0].adaptors[0].ciphertext.pop();
+        }),
+        ("gid changed", |t| t.gid[0] ^= 1),
+    ];
+    for (name, mutate) in mutations {
+        let mut table = deserialize(&bytes);
+        mutate(&mut table);
+        let table = deserialize(&serialize(&table));
+        assert!(!table.has_garbled_shape(), "{name}");
+        let output = evaluate_table(&table, &f.input_mac_key, &f.proof);
+        assert!(
+            matches!(output, Err(EvalError::MalformedTable)),
+            "{name}: {output:?}"
+        );
+    }
+}
+
+/// Tables of the right shape can still disagree with each other. The compact
+/// converters then decode an x with no curve point, which used to panic.
+#[test]
+fn inconsistent_converters_do_not_panic() {
+    let f = fixture();
+    let bytes = serialize(&f.table);
+
+    let mut table = deserialize(&bytes);
+    for x in &mut table.b_ec_mac.x {
+        x.constant += Fq2::ONE;
+    }
+    assert!(table.has_garbled_shape());
+    let output = evaluate_table(&table, &f.input_mac_key, &f.proof);
+    assert!(
+        matches!(output, Err(EvalError::InvalidMacPoint)),
+        "{output:?}"
+    );
+
+    let mut table = deserialize(&bytes);
+    for x in &mut table.c_ec_mac.x {
+        x.constant += Fq::ONE;
+    }
+    let output = evaluate_table(&table, &f.input_mac_key, &f.proof);
+    assert!(
+        matches!(output, Err(EvalError::InvalidMacPoint)),
+        "{output:?}"
+    );
 }

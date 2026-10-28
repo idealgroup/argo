@@ -58,9 +58,15 @@ where
 impl<C, const KAPPA: usize> Table<C, KAPPA>
 where
     C: GLVConfig + Clone,
-    C::ScalarField: Random,
+    C::ScalarField: Random + NumBits,
     <C::ScalarField as Field>::BasePrimeField: FromLeBytesModOrder,
 {
+    /// Whether there is one well-formed adaptor per bit of the scalar.
+    pub(crate) fn has_garbled_shape(&self) -> bool {
+        self.adaptors.len() == C::ScalarField::NUM_BITS
+            && self.adaptors.iter().all(|table| table.has_garbled_shape())
+    }
+
     /// Derives an `OutputMacKey: [EndoMacKey; KAPPA]` given an input_mac_key
     /// and an array of `phi`s
     pub(crate) fn output_mac_key_from_phis(
@@ -207,12 +213,7 @@ where
         let input_mac = input_mac.try_into_group_mac()?;
 
         //   [input_mac] t + [input] s
-        let output_mac = self.bilinear_table.evaluate(input, &input_mac, &self.s);
-
-        // This unwrap cannot fail because both `self.t`, `self.s` are fixed
-        // arrays of length `KAPPA`.
-        let output_mac: [EndoMac<C, Affine<C>>; KAPPA] =
-            output_mac.try_into().unwrap_or_else(|_| panic!());
+        let output_mac = self.bilinear_table.evaluate(input, &input_mac, &self.s)?;
 
         Ok(((self.point * input).into_affine(), output_mac.into()))
     }
@@ -250,6 +251,7 @@ fn test_scalar_mul_fixed() {
     )
     .unwrap();
     clear_set();
+    assert!(circuit.has_garbled_shape());
 
     let expected_output_mac = output_mac_key.encode(&point.mul(input).into_affine());
 

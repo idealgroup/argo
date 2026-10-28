@@ -30,6 +30,17 @@ where
     F: Field + NumBits + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder;
 
+impl<F> Table<F>
+where
+    F: Field + NumBits + FromBits<bool, F> + Random,
+    F::BasePrimeField: FromLeBytesModOrder,
+{
+    /// Whether there is one well-formed bit adaptor per bit of `F`.
+    pub(crate) fn has_garbled_shape(&self) -> bool {
+        self.0.len() == F::NUM_BITS && self.0.iter().all(|table| table.has_garbled_shape())
+    }
+}
+
 pub(crate) type Input<F> = F;
 pub(crate) type InputMac<F> = bytes::DigitMac<F>;
 pub(crate) type InputMacKey<F> = bytes::DigitMacKey<F>;
@@ -117,6 +128,7 @@ where
     let (table, output_mac_key) =
         Table::garble(&mut Nonce::new(), &mut rng, Some(phi), &input_mac_key).unwrap();
     clear_set();
+    assert!(table.has_garbled_shape());
 
     let expected_output_mac = output_mac_key.encode(&output);
     let evaluated_output_mac = table

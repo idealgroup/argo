@@ -7,6 +7,7 @@ use crate::{
     garble::{
         Circuit, Nonce,
         binary::{and, xor},
+        groth16_verifier::GID,
     },
     mac::{
         Mac, MacKey, RandomFromPhi,
@@ -27,6 +28,12 @@ pub(crate) struct Table {
     xp_ap: and::Table,
     // xp_ap XOR a
     output: xor::Table,
+}
+
+impl Table {
+    pub(crate) fn has_garbled_shape(&self, gid: &GID) -> bool {
+        self.xp_ap.has_garbled_shape(gid)
+    }
 }
 
 #[derive(Debug)]
@@ -199,9 +206,7 @@ impl Circuit<Input, InputMac, bool, Bit16ByteMac> for Table {
 
 #[test]
 fn test_gate() {
-    use crate::{
-        garble::groth16_verifier::GID, mac::Random, utils::aes_hash::aes_mitccr::clear_set,
-    };
+    use crate::{mac::Random, utils::aes_hash::aes_mitccr::clear_set};
     use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const SEED: u64 = 0;
@@ -219,6 +224,7 @@ fn test_gate() {
         let (circuit, output_mac_key) =
             Table::garble(&mut Nonce::new(), &mut rng, Some(gid), &input_mac_key).unwrap();
         clear_set();
+        assert!(circuit.has_garbled_shape(&gid));
 
         let output_mac = circuit
             .evaluate(&mut Nonce::new(), &input, &input_mac)

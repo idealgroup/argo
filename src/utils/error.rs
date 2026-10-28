@@ -52,4 +52,10 @@ pub enum EvalError {
     MissingGID(&'static str),
     #[error("Missing DST in Encrypt<AesMiTCCR, Mac1>::decrypt")]
     MissingDST,
+    #[error("The table does not have the shape that garbling produces.")]
+    MalformedTable,
+    #[error("A converted MAC has no point on the curve.")]
+    InvalidMacPoint,
+    #[error("A pairing's Miller loop output is zero.")]
+    DegeneratePairing,
 }

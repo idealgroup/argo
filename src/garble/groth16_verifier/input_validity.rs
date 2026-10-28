@@ -50,8 +50,29 @@ pub(crate) struct Aux {
     pub(super) b_ec_mac_key: Box<[EndoMacKeyG2; KAPPA_B]>,
 }
 
+/// Monomials of the curve membership polynomial B + x^3 - y^2.
+const CURVE_MONOMIALS: [Monomial; 3] = [
+    Monomial::constant(),
+    Monomial::new(3, 0),
+    Monomial::new(0, 2),
+];
+
 // TODO refactor to use Circuit trait?
 impl<const N: usize> Table<N> {
+    pub(crate) fn has_garbled_shape(&self, gid: &GID) -> bool {
+        self.gid == *gid
+            && self.x_range_check.iter().all(|t| t.has_garbled_shape(gid))
+            && self
+                .a_range_check
+                .iter()
+                .chain(&self.b_range_check)
+                .chain(&self.c_range_check)
+                .all(|t| t.has_garbled_shape(gid))
+            && self.a_curve_check.has_garbled_shape(&CURVE_MONOMIALS)
+            && self.b_curve_check.has_garbled_shape(&CURVE_MONOMIALS)
+            && self.c_curve_check.has_garbled_shape(&CURVE_MONOMIALS)
+    }
+
     pub(crate) fn garble(
         parent_nonce: &mut crate::garble::Nonce,
         rng: &mut ark_std::rand::prelude::StdRng,
@@ -68,9 +89,10 @@ impl<const N: usize> Table<N> {
         // = sB + sx^3 -sy^2
         fn curve_membership_poly<C: SWCurveConfig>(secret: C::BaseField) -> Poly<C::BaseField> {
             let mut poly = Poly::default();
-            poly.insert(Monomial::constant(), secret * C::COEFF_B);
-            poly.insert(Monomial::new(3, 0), secret);
-            poly.insert(Monomial::new(0, 2), -secret);
+            let [constant, x3, y2] = CURVE_MONOMIALS;
+            poly.insert(constant, secret * C::COEFF_B);
+            poly.insert(x3, secret);
+            poly.insert(y2, -secret);
 
             poly
         }
@@ -424,6 +446,7 @@ fn test_malformed_curve_points() {
     };
 
     let table = Table::garble(&mut Nonce::new(), &mut rng, &aux, &input_mac_key).unwrap();
+    assert!(table.has_garbled_shape(&gid));
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
 

@@ -19,7 +19,7 @@ use ark_std::rand::{RngCore, rngs::StdRng};
 use crate::{
     garble::{
         Circuit, Nonce,
-        bivariate::{self, Input, InputMac, InputMacKey, Poly},
+        bivariate::{self, Input, InputMac, InputMacKey, Monomial, Poly},
     },
     mac::{
         MacKey, Random, RandomFromPhi,
@@ -53,6 +53,23 @@ where
     pub(crate) doubling: Vec<[u8; 48]>,
 }
 
+/// Monomials of the polynomials `garble` builds for X, Y and Z, in the order
+/// [1, X, Y, X^2, XY, Y^2] of `Poly::biquadratic`.
+const X_MONOMIALS: [Monomial; 4] = [
+    Monomial::constant(),
+    Monomial::new(1, 0),
+    Monomial::new(0, 1),
+    Monomial::new(2, 0),
+];
+const Y_MONOMIALS: [Monomial; 5] = [
+    Monomial::constant(),
+    Monomial::new(0, 1),
+    Monomial::new(2, 0),
+    Monomial::new(1, 1),
+    Monomial::new(0, 2),
+];
+const Z_MONOMIALS: [Monomial; 2] = [Monomial::constant(), Monomial::new(1, 0)];
+
 /// Hash of the labels of every input bit, which only the evaluator holding
 /// those labels can compute.
 fn label_digest<F>(input_mac: &InputMac<F>) -> blake3::Hash {
@@ -80,6 +97,25 @@ where
     C::BaseField: Field + NumBits + FromBits<bool, C::BaseField> + Random,
     <C::BaseField as Field>::BasePrimeField: FromLeBytesModOrder,
 {
+    /// Whether this is the shape `garble` gives `KAPPA` replicas, with Y
+    /// tables exactly when `is_full`.
+    pub(crate) fn has_garbled_shape(&self, is_full: bool) -> bool {
+        let replicas = |tables: &[bivariate::Table<C::BaseField>], monomials: &[Monomial]| {
+            tables.len() == KAPPA
+                && tables
+                    .iter()
+                    .all(|table| table.has_garbled_shape(monomials))
+        };
+        self.is_full == is_full
+            && replicas(&self.x, &X_MONOMIALS)
+            && replicas(&self.z, &Z_MONOMIALS)
+            && match &self.y {
+                Some(y) => is_full && replicas(y, &Y_MONOMIALS),
+                None => !is_full,
+            }
+            && self.doubling.len() == KAPPA
+    }
+
     /// Returns the secret if `input_mac` holds the labels of some replica's
     /// doubling input, for which the converted MAC would be meaningless.
     pub(crate) fn reveal(&self, input_mac: &InputMac<C::BaseField>) -> Option<Fq> {
@@ -308,10 +344,10 @@ where
         };
         let mut zs = Vec::with_capacity(self.z.len());
 
-        let y = if self.is_full {
-            self.y.as_ref().ok_or(EvalError::MissingYTablesError)?
-        } else {
-            &vec![]
+        let y: &[_] = match (&self.y, self.is_full) {
+            (Some(y), true) => y,
+            (None, false) => &[],
+            _ => return Err(EvalError::MissingYTablesError),
         };
 
         for (idx, (x_table, z_table)) in self.x.iter().zip(self.z.iter()).enumerate() {
@@ -322,8 +358,8 @@ where
             xs.push(x_table);
 
             if self.is_full {
-                let y_table = y[idx].evaluate(&mut nonce, input, input_mac)?.0;
-                ys.push(y_table);
+                let y_table = y.get(idx).ok_or(EvalError::MissingYTablesError)?;
+                ys.push(y_table.evaluate(&mut nonce, input, input_mac)?.0);
             }
         }
 
@@ -341,34 +377,30 @@ where
         }
 
         let mut macs = Vec::with_capacity(KAPPA);
-        xs.into_iter()
-            .zip(zs_inv)
-            .enumerate()
-            .for_each(|(idx, (x, z_inv))| {
-                if z_inv.is_zero() {
-                    macs.push(EndoMac::from(Affine::identity()));
-                    return;
-                }
-                // Use Jacobian coordinates, so x / z^2, y / z^3
-                let z2 = z_inv.square();
-                let x = x * z2;
+        for (idx, (x, z_inv)) in xs.into_iter().zip(zs_inv).enumerate() {
+            if z_inv.is_zero() {
+                macs.push(EndoMac::from(Affine::identity()));
+                continue;
+            }
+            // Use Jacobian coordinates, so x / z^2, y / z^3
+            let z2 = z_inv.square();
+            let x = x * z2;
 
-                let y = if self.is_full {
-                    ys[idx] * z_inv * z2
-                } else {
-                    // y^2 = x^3 + b
-                    // FIXME can this unwrap fail?
-                    (x.square() * x + Config::COEFF_B).sqrt().unwrap()
-                };
+            let y = if self.is_full {
+                ys[idx] * z_inv * z2
+            } else {
+                // y^2 = x^3 + b, which has no solution for an x from a
+                // malformed table.
+                (x.square() * x + Config::COEFF_B)
+                    .sqrt()
+                    .ok_or(EvalError::InvalidMacPoint)?
+            };
 
-                let point = Affine::new_unchecked(x, y);
-                let mac = EndoMac::from(point);
-                macs.push(mac);
-            });
+            macs.push(EndoMac::from(Affine::new_unchecked(x, y)));
+        }
 
-        // FIXME can this unwrap fail?
         let macs: [EndoMac<Config, Affine<Config>>; KAPPA] =
-            macs.try_into().unwrap_or_else(|_| panic!());
+            macs.try_into().map_err(|_| EvalError::MalformedTable)?;
 
         Ok((Affine::new_unchecked(input.x, input.y), macs.into()))
     }
@@ -417,6 +449,8 @@ where
     .0;
     aes_ctr_clear_set();
     bit_adaptor_clear_set();
+    assert!(garbling_table.has_garbled_shape(is_full));
+    assert!(!garbling_table.has_garbled_shape(!is_full));
 
     let evaluated_output = garbling_table
         .evaluate(&mut Nonce::new(), &input, &input_mac)

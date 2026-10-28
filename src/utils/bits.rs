@@ -33,14 +33,14 @@ impl FromBits<bool, Fq> for Fq {
 }
 
 impl FromBits<bool, Fq2> for Fq2 {
-    /// # Panics
-    ///
-    /// Panics if `bits` is not of length Fq::MODULUS_BIT_SIZE * 2.
+    /// Returns `None` unless `bits` has length Fq::MODULUS_BIT_SIZE * 2.
     fn from_bits<I: DoubleEndedIterator<Item = bool> + ExactSizeIterator>(
         mut bits: I,
     ) -> Option<Fq2> {
         let fp_len = Fq::MODULUS_BIT_SIZE as usize;
-        assert_eq!(bits.len(), fp_len * 2);
+        if bits.len() != fp_len * 2 {
+            return None;
+        }
 
         let c0 = Fq::from_bits(bits.by_ref().take(fp_len))?;
         let c1 = Fq::from_bits(bits.skip(fp_len))?;
@@ -62,14 +62,14 @@ impl FromBits<Fr, Fr> for Fr {
 }
 
 impl FromBits<Fq, Fq2> for Fq2 {
-    /// # Panics
-    ///
-    /// Panics if `bits` is not of length Fq::MODULUS_BIT_SIZE * 2.
+    /// Returns `None` unless `bits` has length Fq::MODULUS_BIT_SIZE * 2.
     fn from_bits<I: DoubleEndedIterator<Item = Fq> + ExactSizeIterator>(
         mut bits: I,
     ) -> Option<Fq2> {
         let fp_len = Fq::MODULUS_BIT_SIZE as usize;
-        assert_eq!(bits.len(), fp_len * 2);
+        if bits.len() != fp_len * 2 {
+            return None;
+        }
 
         let c0 = Fq::from_bits(bits.by_ref().take(fp_len))?;
         let c1 = Fq::from_bits(bits.skip(fp_len))?;
@@ -79,14 +79,14 @@ impl FromBits<Fq, Fq2> for Fq2 {
 }
 
 impl FromBits<Fq2, Fq2> for Fq2 {
-    /// # Panics
-    ///
-    /// Panics if `bits` is not of length Fq::MODULUS_BIT_SIZE * 2.
+    /// Returns `None` unless `bits` has length Fq::MODULUS_BIT_SIZE * 2.
     fn from_bits<I: DoubleEndedIterator<Item = Fq2> + ExactSizeIterator>(
         mut bits: I,
     ) -> Option<Fq2> {
         let fp_len = Fq::MODULUS_BIT_SIZE as usize;
-        assert_eq!(bits.len(), fp_len * 2);
+        if bits.len() != fp_len * 2 {
+            return None;
+        }
 
         let c0_bits: Vec<_> = bits.by_ref().take(fp_len).collect();
         let c0 = pow_two_lincomb::<_, Fq2, Fq2>(c0_bits);

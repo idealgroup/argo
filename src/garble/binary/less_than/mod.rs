@@ -148,6 +148,15 @@ impl<F> Table<F>
 where
     F: PrimeField + FromBits<F, F> + Random + ToBits + NumBits,
 {
+    /// Whether there is one adaptor and one gate per bit of `F`, all for `gid`.
+    pub(crate) fn has_garbled_shape(&self, gid: &GID) -> bool {
+        self.gid == *gid
+            && self.adaptors.len() == F::NUM_BITS
+            && self.adaptors.iter().all(|table| table.has_garbled_shape())
+            && self.gates.len() == F::NUM_BITS
+            && self.gates.iter().all(|gate| gate.has_garbled_shape(gid))
+    }
+
     /// Evaluates on raw input bits, which may spell a value at or above the
     /// modulus that no `F` can hold.
     pub(crate) fn evaluate_bits(
@@ -230,6 +239,8 @@ where
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
     bit_adaptor_clear_set();
+    assert!(table.has_garbled_shape(&gid));
+    assert!(!table.has_garbled_shape(&[0; 16]));
 
     let output = table
         .evaluate(&mut Nonce::new(), input, &input_mac)

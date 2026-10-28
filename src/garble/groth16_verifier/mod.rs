@@ -56,6 +56,7 @@ use crate::{
         bits::ToBits,
         constants::R_MUL_COFACTOR_GENERATOR,
         error::{EvalError, GarbleError, InputError},
+        group::checked_multi_pairing,
     },
 };
 
@@ -164,13 +165,13 @@ impl<const N: usize> VerifierKey<N> {
     /// proof, it should satisfy
     ///                 e(A, B) e(C, H_1) e([x], H_2) = c^{-1}.
     /// In other words, this method should return Fq12::ONE on a valid proof.
-    fn pairing(&self, input: &Input<N>) -> Fq12 {
+    fn pairing(&self, input: &Input<N>) -> Result<Fq12, EvalError> {
         let x_G1: G1Projective = self.G1.iter().zip(&input.x).map(|(G1, x)| *G1 * x).sum();
-        Bn254::multi_pairing(
-            vec![input.A.into(), input.C.into(), x_G1.into_affine()],
-            vec![input.B.into(), self.H1, self.H2],
-        )
-        .0 * self.c
+        let pairing = checked_multi_pairing(
+            [input.A.into(), input.C.into(), x_G1.into_affine()],
+            [input.B.into(), self.H1, self.H2],
+        )?;
+        Ok(pairing * self.c)
     }
 
     pub(crate) fn garble_preprocess(&self) -> GarblePreprocessedVk {
@@ -621,6 +622,17 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
 }
 
 impl<const N: usize> Table<N> {
+    /// Whether every part has the shape `garble` produces: the replica and bit
+    /// counts, the Y tables, the polynomial monomials and the gids. Check this
+    /// before accepting a table from a garbler; `evaluate_bits` checks it too.
+    pub fn has_garbled_shape(&self) -> bool {
+        self.input_validity.has_garbled_shape(&self.gid)
+            && self.x_G.iter().all(|table| table.has_garbled_shape())
+            && self.a_ec_mac.has_garbled_shape(true)
+            && self.b_ec_mac.has_garbled_shape(false)
+            && self.c_ec_mac.has_garbled_shape(false)
+    }
+
     /// Evaluates on the raw proof bits and their labels. Returns the secret
     /// for an invalid proof and `Fq::ZERO` for a valid one.
     pub fn evaluate_bits(
@@ -629,6 +641,10 @@ impl<const N: usize> Table<N> {
         bits: &InputBits<N>,
         input_mac: &InputMac<N>,
     ) -> Result<Output, EvalError> {
+        if !self.has_garbled_shape() {
+            return Err(EvalError::MalformedTable);
+        }
+
         let input = match self
             .input_validity
             .evaluate_coordinates(parent_nonce, bits, input_mac)?
@@ -680,10 +696,10 @@ impl<const N: usize> Table<N> {
         };
 
         // Compute the pairing e(A,B) e(C, H_1) on the input A, B, C
-        let conditional_reveal_input = self.verifier_key.pairing(&input);
+        let conditional_reveal_input = self.verifier_key.pairing(&input)?;
 
         // Compute the pairing e(A,B) e(C, H_1) on the MACs of A, B, C
-        let conditional_reveal_macs: Result<Vec<_>, EvalError> = {
+        let conditional_reveal_macs = {
             let to_ddh_mac = |ec_mac: &IteratedMac<Affine<g2::Config>, EndoMacG2, KAPPA_B>| {
                 let mut macs = Vec::with_capacity(KAPPA_B);
                 for (i, mac) in ec_mac.iter().enumerate() {
@@ -697,10 +713,12 @@ impl<const N: usize> Table<N> {
                     macs.push(mac);
                 }
                 let macs = Projective::<g2::Config>::normalize_batch(&macs);
-                DDHMac(macs.try_into().unwrap())
+                macs.try_into()
+                    .map(DDHMac)
+                    .map_err(|_| EvalError::MalformedTable)
             };
 
-            let b_ddh_macs = [to_ddh_mac(&b_ec_mac), to_ddh_mac(&-b_ec_mac)];
+            let b_ddh_macs = [to_ddh_mac(&b_ec_mac)?, to_ddh_mac(&-b_ec_mac)?];
             let prepared_c_ec_macs = [c_ec_mac.clone(), -c_ec_mac.clone()];
 
             let mut results = Vec::with_capacity(4); // 2 * 2 = 4 combinations
@@ -712,26 +730,27 @@ impl<const N: usize> Table<N> {
                         &(a_ec_mac.clone(), b_ddh_mac.clone()),
                     )?;
 
-                    let conditional_reveal_mac: [EndoMacFq12; KAPPA_B] =
-                        std::array::from_fn(|idx| {
-                            let AB = &AB_mac[idx];
-                            let C = &c_ec_mac[idx];
-                            // Arkworks skips the identity, so N = 0 costs one
-                            // Miller loop.
-                            let pairing = Bn254::multi_pairing([**C, x_G_mac[idx]], [H1, H2]);
-                            (pairing.0 * **AB).into()
-                        });
+                    let mut conditional_reveal_mac = Vec::with_capacity(KAPPA_B);
+                    for ((AB, C), x_G) in AB_mac.iter().zip(c_ec_mac.iter()).zip(&x_G_mac) {
+                        // Arkworks skips the identity, so N = 0 costs one
+                        // Miller loop.
+                        let pairing = checked_multi_pairing([**C, *x_G], [H1, H2])?;
+                        conditional_reveal_mac.push(EndoMacFq12::from(pairing * **AB));
+                    }
+                    let conditional_reveal_mac: [EndoMacFq12; KAPPA_B] = conditional_reveal_mac
+                        .try_into()
+                        .map_err(|_| EvalError::MalformedTable)?;
 
                     results.push(conditional_reveal_mac.into());
                 }
             }
 
-            Ok(results)
+            results
         };
 
         // Evaluate the conditional reveal circuit.
         self.conditional_reveal
-            .evaluate(&conditional_reveal_input, &conditional_reveal_macs?)
+            .evaluate(&conditional_reveal_input, &conditional_reveal_macs)
     }
 }
 
@@ -907,7 +926,7 @@ fn test_malformed_groth16() {
         H2: G2Affine::rand(&mut rng),
         c: Fq12::ONE,
     };
-    verifier_key.c = verifier_key.pairing(&valid).inverse().unwrap();
+    verifier_key.c = verifier_key.pairing(&valid).unwrap().inverse().unwrap();
 
     let input_mac_key = InputMacKey::random_key(&mut rng);
     let gid = GID::random(&mut rng);
@@ -916,7 +935,7 @@ fn test_malformed_groth16() {
     let mut inputs = [valid; 4];
     // x = r passes the pairing check, so only the range check reveals `secret`.
     inputs[0].x = [Fr::new_unchecked(Fr::MODULUS)];
-    assert_eq!(verifier_key.pairing(&inputs[0]), Fq12::ONE);
+    assert_eq!(verifier_key.pairing(&inputs[0]).unwrap(), Fq12::ONE);
     inputs[1].B.y.c1 = Fq::new_unchecked(Fq::MODULUS);
     inputs[2].C = bivariate::Input {
         x: Fq::ZERO,

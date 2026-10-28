@@ -34,18 +34,18 @@ impl Monomial {
     #[inline]
     fn weight(&self) -> usize {
         // The diagonal
-        let k = self.0 + self.1;
+        let k = self.0 as usize + self.1 as usize;
 
-        ((k * (k + 1) / 2) + self.1) as usize
+        k * (k + 1) / 2 + self.1 as usize
     }
 
     #[inline]
-    pub(crate) fn new(x: u8, y: u8) -> Self {
+    pub(crate) const fn new(x: u8, y: u8) -> Self {
         Self(x, y)
     }
 
     #[inline]
-    pub(crate) fn constant() -> Self {
+    pub(crate) const fn constant() -> Self {
         Self(0, 0)
     }
 }
@@ -64,6 +64,32 @@ impl Ord for Monomial {
 
 /// true => x, false => y
 type XY = bool;
+
+/// The `(XY, Monomial)` of each digit adaptor table that `Table::garble`
+/// emits, in order, for a polynomial with these monomials. Garbling reduces
+/// each monomial by one degree in x (or else y), which can add lower ones.
+fn table_monomials(monomials: &[Monomial]) -> Vec<(XY, Monomial)> {
+    let len = monomials.iter().map(|m| m.weight() + 1).max().unwrap_or(0);
+    let mut present = vec![None; len];
+    for monomial in monomials {
+        present[monomial.weight()] = Some(*monomial);
+    }
+
+    let mut tables = Vec::new();
+    for idx in (0..len).rev() {
+        let Some(Monomial(i, j)) = present[idx] else {
+            continue;
+        };
+        let (xy, monomial) = match (i, j) {
+            (0, 0) => continue,
+            (0, j) => (false, Monomial(0, j - 1)),
+            (i, j) => (true, Monomial(i - 1, j)),
+        };
+        present[monomial.weight()] = Some(monomial);
+        tables.push((xy, monomial));
+    }
+    tables
+}
 
 /// Bivariate polynomial in coefficient form, mapping from monomial to
 /// coefficient.
@@ -246,8 +272,27 @@ where
     F: Field + NumBits + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder,
 {
-    constant: F,
-    tables: Vec<(XY, Monomial, digit_adaptor::Table<F>)>,
+    pub(crate) constant: F,
+    pub(crate) tables: Vec<(XY, Monomial, digit_adaptor::Table<F>)>,
+}
+
+impl<F> Table<F>
+where
+    F: Field + NumBits + FromBits<bool, F> + Random,
+    F::BasePrimeField: FromLeBytesModOrder,
+{
+    /// Whether this is the shape `garble` gives a polynomial with `monomials`.
+    pub(crate) fn has_garbled_shape(&self, monomials: &[Monomial]) -> bool {
+        let expected = table_monomials(monomials);
+        self.tables.len() == expected.len()
+            && self
+                .tables
+                .iter()
+                .zip(expected)
+                .all(|((xy, monomial, table), expected)| {
+                    (*xy, *monomial) == expected && table.has_garbled_shape()
+                })
+    }
 }
 
 impl<F> Circuit<Input<F>, InputMac<F>, F, IdentityMac<F>> for Table<F>
@@ -343,6 +388,8 @@ where
         .unwrap()
         .0;
     clear_set();
+    let monomials: Vec<_> = poly.iter().filter_map(|(monomial, _)| *monomial).collect();
+    assert!(garbling_table.has_garbled_shape(&monomials));
 
     let input = <InputMac<F> as Mac<Input<F>>>::random_input(rng);
     let input_mac = input_mac_key.encode(&input);
