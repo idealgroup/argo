@@ -579,6 +579,11 @@ impl<const N: usize> Table<N> {
         })
     }
 
+    /// The global ID that domain-separates this table's hashes.
+    pub fn gid(&self) -> GID {
+        self.gid
+    }
+
     /// Whether every part has the shape `garble` produces: the replica and bit
     /// counts, the Y tables, the polynomial monomials and the gids. Check this
     /// before accepting a table from a garbler; `evaluate_bits` checks it too.

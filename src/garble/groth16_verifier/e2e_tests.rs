@@ -955,6 +955,8 @@ fn same_seed_rebuilds_the_instance() {
     let other = garble_with(SEED + 1, &f.verifier_key);
     assert_ne!(serialize(&other.table), serialize(&f.garbling.table));
     assert_ne!(other.secret, f.garbling.secret);
+    assert_eq!(again.table.gid(), f.garbling.table.gid());
+    assert_ne!(other.table.gid(), f.garbling.table.gid());
 }
 
 #[test]
