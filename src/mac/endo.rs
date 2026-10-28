@@ -7,7 +7,7 @@ use std::{marker::PhantomData, ops::Neg};
 
 use ark_bn254::{Bn254, Fq, Fq12, Fr, g1, g2};
 use ark_ec::{
-    AdditiveGroup, CurveGroup, PrimeGroup,
+    AdditiveGroup, AffineRepr, CurveGroup, PrimeGroup,
     pairing::Pairing,
     scalar_mul::glv::GLVConfig,
     short_weierstrass::{Affine, Projective},
@@ -127,6 +127,7 @@ where
     fn endo(&self, point: Affine<G>) -> Affine<G> {
         match self {
             Self::NegInf(_) => Affine::identity(),
+            _ if point.is_zero() => point,
             _ => {
                 let phi = Self::omega_base().pow([self.as_u8() as u64]);
                 let (a, b) = {
@@ -135,11 +136,7 @@ where
                     (phi_sq.square(), phi_sq * phi)
                 };
 
-                Affine {
-                    x: a * point.x,
-                    y: b * point.y,
-                    infinity: point.infinity,
-                }
+                Affine::new_unchecked(a * point.x, b * point.y)
             }
         }
     }

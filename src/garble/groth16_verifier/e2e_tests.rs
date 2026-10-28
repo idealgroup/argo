@@ -14,8 +14,8 @@ use ark_ec::{
 use ark_ff::{BigInt, BigInteger, Field, PrimeField, Zero};
 use ark_groth16::{Groth16, Proof};
 use ark_relations::{
+    gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable},
     lc,
-    r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable},
 };
 use ark_snark::SNARK;
 use ark_std::{
@@ -47,7 +47,7 @@ impl ConstraintSynthesizer<Fr> for Multiply {
         let a_var = cs.new_witness_variable(|| a)?;
         let b_var = cs.new_witness_variable(|| b)?;
         let x_var = cs.new_input_variable(|| Ok(a? * b?))?;
-        cs.enforce_constraint(lc!() + a_var, lc!() + b_var, lc!() + x_var)
+        cs.enforce_r1cs_constraint(|| lc!() + a_var, || lc!() + b_var, || lc!() + x_var)
     }
 }
 
@@ -466,8 +466,12 @@ impl ConstraintSynthesizer<Fr> for MulAdd {
         let b_var = cs.new_witness_variable(|| b)?;
         let x1 = cs.new_input_variable(|| Ok(a? * b?))?;
         let x2 = cs.new_input_variable(|| Ok(a? + b?))?;
-        cs.enforce_constraint(lc!() + a_var, lc!() + b_var, lc!() + x1)?;
-        cs.enforce_constraint(lc!() + a_var + b_var, lc!() + Variable::One, lc!() + x2)
+        cs.enforce_r1cs_constraint(|| lc!() + a_var, || lc!() + b_var, || lc!() + x1)?;
+        cs.enforce_r1cs_constraint(
+            || lc!() + a_var + b_var,
+            || lc!() + Variable::One,
+            || lc!() + x2,
+        )
     }
 }
 
@@ -480,7 +484,7 @@ struct Idempotent {
 impl ConstraintSynthesizer<Fr> for Idempotent {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let a = cs.new_witness_variable(|| self.a.ok_or(SynthesisError::AssignmentMissing))?;
-        cs.enforce_constraint(lc!() + a, lc!() + a, lc!() + a)
+        cs.enforce_r1cs_constraint(|| lc!() + a, || lc!() + a, || lc!() + a)
     }
 }
 
@@ -970,4 +974,46 @@ fn fixture_without_garbled_inputs() -> VerifierKey<0> {
     let (pk, vk) = mul_add_setup(&mut rng);
     let (_, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
     VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap()
+}
+
+/// A flipped bit anywhere in a hidden table either fails to deserialize or
+/// gives a table that evaluates without panicking.
+#[test]
+fn flipped_bits_do_not_panic() {
+    use ark_std::rand::Rng;
+
+    let f = fixture();
+    let bytes = serialize(&f.garbling.table);
+    let mut rng = StdRng::seed_from_u64(SEED);
+    for _ in 0..16 {
+        let mut flipped = bytes.clone();
+        flipped[rng.gen_range(0..bytes.len())] ^= 1 << rng.gen_range(0..8);
+        if let Ok(table) = Table::<1>::deserialize_compressed(&flipped[..]) {
+            let _ = evaluate_table(&f.verifier_key, &table, &f.garbling.input_mac_key, &f.proof);
+        }
+    }
+}
+
+/// A length prefix comes before the elements it counts, so a huge one must
+/// fail on the missing elements rather than allocate for them up front.
+#[test]
+fn huge_length_prefixes_are_rejected() {
+    let f = fixture();
+    let bytes = serialize(&f.garbling.table);
+    let lengths = [KAPPA_A, KAPPA_B, COMPONENT_BITS].map(|len| (len as u64).to_le_bytes());
+    let prefixes: Vec<_> = (0..bytes.len() - 8)
+        .filter(|&i| lengths.iter().any(|len| bytes[i..i + 8] == *len))
+        .collect();
+    assert!(prefixes.len() > 8);
+
+    for &i in prefixes.iter().step_by(prefixes.len() / 8) {
+        for huge in [u64::MAX, 1 << 40] {
+            let mut mutated = bytes.clone();
+            mutated[i..i + 8].copy_from_slice(&huge.to_le_bytes());
+            assert!(
+                Table::<1>::deserialize_compressed(&mutated[..]).is_err(),
+                "length {huge} at byte {i}"
+            );
+        }
+    }
 }
