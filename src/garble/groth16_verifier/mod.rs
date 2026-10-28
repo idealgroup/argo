@@ -819,8 +819,6 @@ fn test_groth16_serde_roundtrip() {
     use ark_ec::PrimeGroup;
     use ark_ff::UniformRand;
     use ark_std::rand::rngs::StdRng;
-    use std::fs::File;
-    use std::io::{BufReader, BufWriter, Write};
 
     const SEED: u64 = 0;
 
@@ -849,18 +847,12 @@ fn test_groth16_serde_roundtrip() {
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
 
-    std::fs::create_dir_all("bin").expect("Could not create directory /bin");
-    let file_name = "bin/groth16_table.bin";
-    let file = File::create(file_name).expect("Could not create file");
-    let mut writer = BufWriter::new(file);
-    original_table.serialize_compressed(&mut writer).unwrap();
-    writer.flush().unwrap();
+    let mut bytes = Vec::new();
+    original_table.serialize_compressed(&mut bytes).unwrap();
 
     drop(original_table);
 
-    let file = File::open(file_name).expect("Could not open file");
-    let mut reader = BufReader::new(file);
-    let deserialised_table = Table::deserialize_compressed(&mut reader).unwrap();
+    let deserialised_table = Table::deserialize_compressed(&*bytes).unwrap();
     let deserialised_output = deserialised_table
         .evaluate_bits(&verifier_key, &bits, &input_mac)
         .unwrap();
