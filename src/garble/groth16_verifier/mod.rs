@@ -1,10 +1,14 @@
 //! Garbling table for a Groth16 verifier that commits to a secret `s`.
 //! This table reveals `s` if it is evaluated on:
-//! - (A, B, C) that does not satisfy e(A, B) e(C, H_1) e([x], H_2) = c^{-1},
-//! where H_1, c are from the verifier key;
+//! - (A, B, C, x) that does not satisfy e(A, B) e(C, H_1) e([x], H_2) = c^{-1},
+//!   where [x] = Σ x_l G1_l over the `N` garbled public inputs, and H_1, c are
+//!   from the verifier key;
 //! - (A, B, C) where any of the points is an invalid curve point;
 //! - (A, B, C) where any of the (x, y) coordinates is larger than |Fq|;
-//! - `x`` where `x` is larger than |Fr|.
+//! - `x_l` where `x_l` is larger than |Fr|.
+//!
+//! Public inputs known at garbling time are folded into `c` instead, so with
+//! `N = 0` the proof is (A, B, C) alone.
 
 pub(crate) mod input_validity;
 
@@ -16,7 +20,7 @@ mod golden_tests;
 use core::panic;
 use std::{any::type_name, marker::PhantomData};
 
-use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, G1Affine, G2Affine, g1, g2};
+use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, G1Affine, G1Projective, G2Affine, g1, g2};
 use ark_ec::{
     AffineRepr, CurveGroup,
     pairing::Pairing,
@@ -59,6 +63,8 @@ use crate::mac::Random;
 use crate::utils::aes_hash::{
     aes_ctr::clear_set as aes_ctr_clear_set, aes_mitccr::clear_set as aes_mitccr_clear_set,
 };
+#[cfg(feature = "groth16")]
+use crate::utils::error::VerifierKeyError;
 
 static PREPROCESSED_VK: RwLock<Option<GarblePreprocessedVk>> = RwLock::new(None);
 
@@ -75,13 +81,23 @@ pub const KAPPA_A: usize = 92;
 
 pub type GID = [u8; 16];
 
-/// Groth16 verifier key
-#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize)]
-pub struct VerifierKey {
-    pub G1: G1Affine,
+/// Groth16 verifier key with `N` garbled public inputs. Public inputs that are
+/// fixed at garbling time are folded into `c` and need no labels.
+#[derive(Debug, Clone, Copy, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
+pub struct VerifierKey<const N: usize = 1> {
+    pub G1: [G1Affine; N],
     pub H1: G2Affine,
     pub H2: G2Affine,
     pub c: Fq12,
+}
+
+/// How a Groth16 public input enters the garbled verifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicInput {
+    /// Known at garbling time and folded into `c`.
+    Constant(Fr),
+    /// Part of the proof, with its own labels.
+    Garbled,
 }
 
 #[derive(Copy, Clone)]
@@ -92,18 +108,64 @@ pub struct GarblePreprocessedVk {
     pub h2_target_pow_2: [Fq12; Fr::MODULUS_BIT_SIZE as usize],
 }
 
-impl VerifierKey {
-    /// Given the input (A, B, C), returns e(A, B) e(C, H_1) e([x], H_2) * c.
-    /// Recall that if (A, B, C) is a valid Groth16 proof, it should satisfy
+impl<const N: usize> VerifierKey<N> {
+    /// Builds the key from a Groth16 verifying key. `inputs` gives every public
+    /// input in order; exactly `N` of them must be [`PublicInput::Garbled`].
+    #[cfg(feature = "groth16")]
+    pub fn from_groth16(
+        vk: &ark_groth16::VerifyingKey<Bn254>,
+        inputs: &[PublicInput],
+    ) -> Result<Self, VerifierKeyError> {
+        let (ic0, ics) = vk
+            .gamma_abc_g1
+            .split_first()
+            .ok_or(VerifierKeyError::MissingConstantTerm)?;
+        if inputs.len() != ics.len() {
+            return Err(VerifierKeyError::PublicInputLength {
+                expected: ics.len(),
+                actual: inputs.len(),
+            });
+        }
+
+        let mut l = ic0.into_group();
+        let mut garbled = Vec::with_capacity(N);
+        for (input, ic) in inputs.iter().zip(ics) {
+            match input {
+                PublicInput::Constant(x) => l += *ic * x,
+                PublicInput::Garbled => garbled.push(*ic),
+            }
+        }
+        let G1 =
+            garbled
+                .try_into()
+                .map_err(|garbled: Vec<_>| VerifierKeyError::GarbledInputCount {
+                    expected: N,
+                    actual: garbled.len(),
+                })?;
+
+        // e(A, B) = e(alpha, beta) e(L, gamma) e(C, delta)
+        let c = Bn254::multi_pairing([vk.alpha_g1, l.into_affine()], [vk.beta_g2, vk.gamma_g2])
+            .0
+            .inverse()
+            .ok_or(VerifierKeyError::DegenerateKey)?;
+
+        Ok(Self {
+            G1,
+            H1: -vk.delta_g2,
+            H2: -vk.gamma_g2,
+            c,
+        })
+    }
+
+    /// Given the input (A, B, C, x), returns e(A, B) e(C, H_1) e([x], H_2) * c,
+    /// where [x] = Σ x_l G1_l. Recall that if (A, B, C, x) is a valid Groth16
+    /// proof, it should satisfy
     ///                 e(A, B) e(C, H_1) e([x], H_2) = c^{-1}.
     /// In other words, this method should return Fq12::ONE on a valid proof.
-    fn pairing(&self, input: &Input) -> Fq12 {
+    fn pairing(&self, input: &Input<N>) -> Fq12 {
+        let x_G1: G1Projective = self.G1.iter().zip(&input.x).map(|(G1, x)| *G1 * x).sum();
         Bn254::multi_pairing(
-            vec![
-                input.A.into(),
-                input.C.into(),
-                (self.G1 * input.x).into_affine(),
-            ],
+            vec![input.A.into(), input.C.into(), x_G1.into_affine()],
             vec![input.B.into(), self.H1, self.H2],
         )
         .0 * self.c
@@ -148,16 +210,16 @@ impl VerifierKey {
     }
 }
 
-/// Groth16 proof.
+/// Groth16 proof with `N` garbled public inputs.
 #[derive(Debug, Clone, Copy)]
-pub struct Input {
+pub struct Input<const N: usize = 1> {
     pub A: bivariate::Input<Fq>,
     pub B: bivariate::Input<Fq2>,
     pub C: bivariate::Input<Fq>,
-    pub x: Fr,
+    pub x: [Fr; N],
 }
 
-impl Input {
+impl<const N: usize> Input<N> {
     pub fn random(rng: &mut StdRng) -> Self {
         use ark_ff::UniformRand;
 
@@ -165,47 +227,47 @@ impl Input {
             A: G1Affine::rand(rng).into(),
             B: G2Affine::rand(rng).into(),
             C: G1Affine::rand(rng).into(),
-            x: Fr::rand(rng),
+            x: std::array::from_fn(|_| Fr::rand(rng)),
         }
     }
 }
 
 /// Input MAC key from the Groth16 proof.
 #[derive(Clone)]
-pub struct InputMacKey {
+pub struct InputMacKey<const N: usize = 1> {
     A: bivariate::InputMacKey<Fq>,
     B: bivariate::InputMacKey<Fq2>,
     C: bivariate::InputMacKey<Fq>,
-    x: digit::bytes::DigitMacKey<Fr>,
+    x: [digit::bytes::DigitMacKey<Fr>; N],
 }
 
 /// Input MAC of the Groth16 proof.
 #[derive(Debug, Clone)]
-pub struct InputMac {
+pub struct InputMac<const N: usize = 1> {
     A: bivariate::InputMac<Fq>,
     B: bivariate::InputMac<Fq2>,
     C: bivariate::InputMac<Fq>,
-    x: digit::bytes::DigitMac<Fr>,
+    x: [digit::bytes::DigitMac<Fr>; N],
 }
 
 type Output = conditional_reveal::Output;
 
-impl MacKey<Input, InputMac> for InputMacKey {
-    fn encode(&self, value: &Input) -> InputMac {
+impl<const N: usize> MacKey<Input<N>, InputMac<N>> for InputMacKey<N> {
+    fn encode(&self, value: &Input<N>) -> InputMac<N> {
         InputMac {
             A: self.A.encode(&value.A),
             B: self.B.encode(&value.B),
             C: self.C.encode(&value.C),
-            x: self.x.encode(&value.x),
+            x: std::array::from_fn(|l| self.x[l].encode(&value.x[l])),
         }
     }
     #[cfg(test)]
-    fn decode(&self, mac: &InputMac) -> Input {
+    fn decode(&self, mac: &InputMac<N>) -> Input<N> {
         Input {
             A: self.A.decode(&mac.A),
             B: self.B.decode(&mac.B),
             C: self.C.decode(&mac.C),
-            x: self.x.decode(&mac.x),
+            x: std::array::from_fn(|l| self.x[l].decode(&mac.x[l])),
         }
     }
     fn random_key(rng: &mut StdRng) -> Self {
@@ -213,29 +275,29 @@ impl MacKey<Input, InputMac> for InputMacKey {
             A: bivariate::InputMacKey::random_key(rng),
             B: bivariate::InputMacKey::random_key(rng),
             C: bivariate::InputMacKey::random_key(rng),
-            x: digit::bytes::DigitMacKey::random_key(rng),
+            x: std::array::from_fn(|_| digit::bytes::DigitMacKey::random_key(rng)),
         }
     }
 }
 
-impl Mac<Input> for InputMac {
-    type Key = InputMacKey;
+impl<const N: usize> Mac<Input<N>> for InputMac<N> {
+    type Key = InputMacKey<N>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Input {
+    fn random_input(rng: &mut StdRng) -> Input<N> {
         Input::random(rng)
     }
 }
 
 /// Given an RNG seed, a domain separation tag for the fixed-key AES hash, and
 /// the verifier key, returns a garbling table and the input MAC key used
-pub fn garble_groth16(
+pub fn garble_groth16<const N: usize>(
     rng_seed: u64,
     secret: Fq,
-    verifier_key: VerifierKey,
-    input_mac_key: &InputMacKey,
+    verifier_key: VerifierKey<N>,
+    input_mac_key: &InputMacKey<N>,
     gid: GID,
-) -> Result<Table, GarbleError> {
+) -> Result<Table<N>, GarbleError> {
     let mut rng = StdRng::seed_from_u64(rng_seed);
     let mut nonce = Nonce::new();
 
@@ -257,11 +319,11 @@ pub fn garble_groth16(
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 /// This table is structured as a collection of smaller modular tables.
-pub struct Table {
+pub struct Table<const N: usize = 1> {
     // Check that the input is well-formed
-    input_validity: input_validity::Table,
-    // [x]G
-    x_G: scalar_mul::fixed::Table<g1::Config, KAPPA_B>,
+    input_validity: input_validity::Table<N>,
+    // [x_l]G1_l for each garbled public input
+    x_G: [scalar_mul::fixed::Table<g1::Config, KAPPA_B>; N],
     // Maps input MAC of (A.x, A.y) to iterated MAC of A projective coordinates
     a_ec_mac: field_mac_to_ec_mac::Table<g1::Config, KAPPA_A>,
     // Maps input MAC of (B.x, B.y) to iterated MAC of B projective coordinates
@@ -273,19 +335,19 @@ pub struct Table {
     // Leaks secret if evaluated on an input != 1 and its MAC
     pub conditional_reveal: conditional_reveal::Table<KAPPA_B>,
     // Groth16 verifier key
-    verifier_key: VerifierKey,
+    verifier_key: VerifierKey<N>,
     // Global ID of this instance
     gid: GID,
 }
 
-impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
-    type Aux = (Fq, GID, VerifierKey);
+impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>> for Table<N> {
+    type Aux = (Fq, GID, VerifierKey<N>);
 
     fn garble(
         parent_nonce: &mut Nonce,
         rng: &mut StdRng,
         aux: Option<Self::Aux>,
-        input_mac_key: &InputMacKey,
+        input_mac_key: &InputMacKey<N>,
     ) -> Result<(Self, <IdentityMac<Output> as Mac<Output>>::Key), GarbleError> {
         // The secret that will be conditionally revealed, and the Groth16 verifier key
         let (secret, gid, verifier_key) = aux
@@ -370,9 +432,7 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
         )?
         .0;
 
-        let (x_G, x_G_output_mac_key) = {
-            let input_mac_key = &input_mac_key.x;
-
+        let (x_G, x_G_output_mac_keys) = {
             let mut c_phis = vec![EndoScalar::default(); KAPPA_B];
             c_phis
                 .iter_mut()
@@ -382,14 +442,26 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
                 });
             // This unwrap cannot fail because `pairing_output_mac_key` is a
             // fixed array of length `KAPPA_B`.
-            let c_phis = c_phis.try_into().unwrap_or_else(|_| panic!());
+            let c_phis: [EndoScalar<g1::Config>; KAPPA_B] =
+                c_phis.try_into().unwrap_or_else(|_| panic!());
 
-            scalar_mul::fixed::Table::garble(
-                parent_nonce,
-                rng,
-                Some((verifier_key.G1, c_phis)),
-                input_mac_key,
-            )?
+            let mut tables = Vec::with_capacity(N);
+            let mut keys = Vec::with_capacity(N);
+            for (G1, input_mac_key) in verifier_key.G1.iter().zip(&input_mac_key.x) {
+                let (table, key) = scalar_mul::fixed::Table::garble(
+                    parent_nonce,
+                    rng,
+                    Some((*G1, c_phis.clone())),
+                    input_mac_key,
+                )?;
+                tables.push(table);
+                keys.push(key);
+            }
+            // These unwraps cannot fail because both vectors hold one entry
+            // per garbled input.
+            let tables: [_; N] = tables.try_into().unwrap_or_else(|_| panic!());
+            let keys: [_; N] = keys.try_into().unwrap_or_else(|_| panic!());
+            (tables, keys)
         };
 
         // Garbling table for the conditional revelation of `secret`.
@@ -398,7 +470,7 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
                 &verifier_key,
                 &pairing_output_mac_key,
                 &c_ec_mac_key,
-                &x_G_output_mac_key,
+                &x_G_output_mac_keys,
             )?;
 
             conditional_reveal::Table::garble(enc_s, &input_mac_key)
@@ -423,8 +495,8 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
     fn evaluate(
         &self,
         parent_nonce: &mut Nonce,
-        input: &Input,
-        input_mac: &InputMac,
+        input: &Input<N>,
+        input_mac: &InputMac<N>,
     ) -> Result<(Output, IdentityMac<Output>), EvalError> {
         // The Groth16 input (A, B, C).
         let Input { A, B, C, x } = *input;
@@ -463,7 +535,18 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
         // Evaluate the field_to_ec_mac table for `C`.
         let c_ec_mac = self.c_ec_mac.evaluate(parent_nonce, &C, &input_mac.C)?.1;
 
-        let x_G_mac = self.x_G.evaluate(parent_nonce, &x, &input_mac.x)?.1;
+        // Σ_l MAC([x_l]G1_l) for each replica. All x_G tables share the
+        // pairing output's phis, so the sum is a MAC of [x] = Σ_l x_l G1_l.
+        let x_G_mac = {
+            let mut sums = vec![G1Projective::ZERO; KAPPA_B];
+            for ((table, x), input_mac) in self.x_G.iter().zip(&x).zip(&input_mac.x) {
+                let mac = table.evaluate(parent_nonce, x, input_mac)?.1;
+                sums.iter_mut()
+                    .zip(mac.iter())
+                    .for_each(|(sum, mac)| *sum += **mac);
+            }
+            G1Projective::normalize_batch(&sums)
+        };
 
         // Compute the pairing e(A,B) e(C, H_1) on the input A, B, C
         let conditional_reveal_input = self.verifier_key.pairing(input);
@@ -502,8 +585,9 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
                         std::array::from_fn(|idx| {
                             let AB = &AB_mac[idx];
                             let C = &c_ec_mac[idx];
-                            let x_G = &x_G_mac[idx];
-                            let pairing = Bn254::multi_pairing([**C, **x_G], [H1, H2]);
+                            // Arkworks skips the identity, so N = 0 costs one
+                            // Miller loop.
+                            let pairing = Bn254::multi_pairing([**C, x_G_mac[idx]], [H1, H2]);
                             (pairing.0 * **AB).into()
                         });
 
@@ -569,14 +653,23 @@ fn test_valid_groth16() {
     // Construct `c` for the verifier key s.t. our chosen inputs are valid,
     // i.e. e(A,B) e(C, H_1) = c^{-1}
     let c = Bn254::multi_pairing(
-        vec![input.A.into(), input.C.into(), (G1 * input.x).into_affine()],
+        vec![
+            input.A.into(),
+            input.C.into(),
+            (G1 * input.x[0]).into_affine(),
+        ],
         vec![input.B.into(), H1, H2],
     )
     .0
     .inverse()
     .unwrap();
 
-    let verifier_key = VerifierKey { G1, H1, H2, c };
+    let verifier_key = VerifierKey {
+        G1: [G1],
+        H1,
+        H2,
+        c,
+    };
     let output = test_groth16(&mut rng, &input, &verifier_key, secret);
 
     // Assert that the circuit returns Fq::ZERO when evaluated on a valid input
@@ -594,7 +687,7 @@ fn test_invalid_groth16() {
 
     let input = InputMac::random_input(&mut rng);
     let verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
+        G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,
@@ -628,7 +721,7 @@ fn test_groth16_serde_roundtrip() {
     let gid = GID::random(&mut rng);
 
     let verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
+        G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Bn254::pairing(G1Projective::rand(&mut rng), G2Projective::generator()).0,
@@ -677,9 +770,9 @@ fn test_malformed_groth16() {
     let secret = Fq::rand(&mut rng);
 
     let mut valid = Input::random(&mut rng);
-    valid.x = Fr::ZERO;
+    valid.x = [Fr::ZERO];
     let mut verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
+        G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Fq12::ONE,
@@ -692,7 +785,7 @@ fn test_malformed_groth16() {
 
     let mut inputs = [valid; 4];
     // x = r passes the pairing check, so only the range check reveals `secret`.
-    inputs[0].x = Fr::new_unchecked(Fr::MODULUS);
+    inputs[0].x = [Fr::new_unchecked(Fr::MODULUS)];
     assert_eq!(verifier_key.pairing(&inputs[0]), Fq12::ONE);
     inputs[1].B.y.c1 = Fq::new_unchecked(Fq::MODULUS);
     inputs[2].C = bivariate::Input {

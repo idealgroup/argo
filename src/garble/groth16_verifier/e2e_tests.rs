@@ -9,14 +9,13 @@ use std::{
 
 use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, G1Affine, G2Affine, g2};
 use ark_ec::{
-    AffineRepr, CurveGroup, pairing::Pairing, scalar_mul::glv::GLVConfig,
-    short_weierstrass::SWCurveConfig,
+    AffineRepr, CurveGroup, scalar_mul::glv::GLVConfig, short_weierstrass::SWCurveConfig,
 };
 use ark_ff::{Field, PrimeField, Zero};
 use ark_groth16::{Groth16, Proof};
 use ark_relations::{
     lc,
-    r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
+    r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, Variable},
 };
 use ark_snark::SNARK;
 use ark_std::{
@@ -84,23 +83,12 @@ fn fixture() -> &'static Fixture {
             };
             let proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng).unwrap();
             assert!(Groth16::<Bn254>::verify(&vk, &[a * b], &proof).unwrap());
-            proof_input(&proof, a * b)
+            proof_input(&proof, [a * b])
         };
         let proof = prove(3, 11);
         let zero_proof = prove(0, 7);
 
-        // e(A, B) = e(alpha, beta) e(L, gamma) e(C, delta) with
-        // L = gamma_abc[0] + x gamma_abc[1].
-        let c = Bn254::multi_pairing([vk.alpha_g1, vk.gamma_abc_g1[0]], [vk.beta_g2, vk.gamma_g2])
-            .0
-            .inverse()
-            .unwrap();
-        let verifier_key = VerifierKey {
-            G1: vk.gamma_abc_g1[1],
-            H1: -vk.delta_g2,
-            H2: -vk.gamma_g2,
-            c,
-        };
+        let verifier_key = VerifierKey::from_groth16(&vk, &[PublicInput::Garbled]).unwrap();
         assert_eq!(verifier_key.pairing(&proof), Fq12::ONE);
         assert_eq!(verifier_key.pairing(&zero_proof), Fq12::ONE);
 
@@ -123,7 +111,7 @@ fn fixture() -> &'static Fixture {
     })
 }
 
-fn proof_input(proof: &Proof<Bn254>, x: Fr) -> Input {
+fn proof_input<const N: usize>(proof: &Proof<Bn254>, x: [Fr; N]) -> Input<N> {
     Input {
         A: proof.a.into(),
         B: proof.b.into(),
@@ -153,11 +141,11 @@ fn garbler_keys() -> GarblerKeys {
 
 /// The replayed keys must be the ones inside the garbled converters, otherwise
 /// the crafted inputs below would only be random invalid proofs.
-fn assert_replayed_keys(
-    table: &Table,
-    input_mac_key: &InputMacKey,
+fn assert_replayed_keys<const N: usize>(
+    table: &Table<N>,
+    input_mac_key: &InputMacKey<N>,
     keys: &GarblerKeys,
-    input: &Input,
+    input: &Input<N>,
 ) {
     let input_mac = input_mac_key.encode(input);
     let mut nonce = Nonce::new();
@@ -215,24 +203,42 @@ fn doubling_input<G: GLVConfig + PSqModR>(keys: &[EndoMacKey<G, Affine<G>>]) -> 
         .unwrap()
 }
 
-fn evaluate(input: &Input) -> Result<Fq, EvalError> {
-    let f = fixture();
-    let input_mac = f.input_mac_key.encode(input);
+fn evaluate_table<const N: usize>(
+    table: &Table<N>,
+    input_mac_key: &InputMacKey<N>,
+    input: &Input<N>,
+) -> Result<Fq, EvalError> {
+    let input_mac = input_mac_key.encode(input);
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
-    let output = f.table.evaluate(&mut Nonce::new(), input, &input_mac);
+    let output = table.evaluate(&mut Nonce::new(), input, &input_mac);
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
     output.map(|(output, _)| output)
 }
 
+fn evaluate(input: &Input) -> Result<Fq, EvalError> {
+    let f = fixture();
+    evaluate_table(&f.table, &f.input_mac_key, input)
+}
+
 /// Asserts every case reveals the secret, reporting all failing cases at once.
 fn assert_reveal(cases: Vec<(&str, Input)>) {
-    let secret = fixture().secret;
+    let f = fixture();
+    assert_reveals(&f.table, &f.input_mac_key, f.secret, cases);
+}
+
+fn assert_reveals<const N: usize>(
+    table: &Table<N>,
+    input_mac_key: &InputMacKey<N>,
+    secret: Fq,
+    cases: Vec<(&str, Input<N>)>,
+) {
     let failures: Vec<_> = cases
         .into_iter()
         .filter_map(|(name, input)| {
-            let outcome = match catch_unwind(AssertUnwindSafe(|| evaluate(&input))) {
+            let evaluate = || evaluate_table(table, input_mac_key, &input);
+            let outcome = match catch_unwind(AssertUnwindSafe(evaluate)) {
                 Ok(Ok(output)) if output == secret => return None,
                 Ok(Ok(output)) if output.is_zero() => "accepted".to_owned(),
                 Ok(Ok(_)) => "wrong output".to_owned(),
@@ -245,21 +251,21 @@ fn assert_reveal(cases: Vec<(&str, Input)>) {
     assert!(failures.is_empty(), "secret not revealed: {failures:#?}");
 }
 
-fn with_a(input: &Input, A: G1Affine) -> Input {
+fn with_a<const N: usize>(input: &Input<N>, A: G1Affine) -> Input<N> {
     Input {
         A: A.into(),
         ..*input
     }
 }
 
-fn with_b(input: &Input, B: G2Affine) -> Input {
+fn with_b<const N: usize>(input: &Input<N>, B: G2Affine) -> Input<N> {
     Input {
         B: B.into(),
         ..*input
     }
 }
 
-fn with_c(input: &Input, C: G1Affine) -> Input {
+fn with_c<const N: usize>(input: &Input<N>, C: G1Affine) -> Input<N> {
     Input {
         C: C.into(),
         ..*input
@@ -301,7 +307,7 @@ fn invalid_proofs_reveal_secret() {
         (
             "x + 1",
             Input {
-                x: f.proof.x + Fr::ONE,
+                x: [f.proof.x[0] + Fr::ONE],
                 ..f.proof
             },
         ),
@@ -324,7 +330,7 @@ fn malformed_proofs_reveal_secret() {
 
     // x = r is the zero proof's own public input, so the pairing accepts it.
     let non_canonical_x = Input {
-        x: Fr::new_unchecked(Fr::MODULUS),
+        x: [Fr::new_unchecked(Fr::MODULUS)],
         ..f.zero_proof
     };
     assert_eq!(f.table.verifier_key.pairing(&non_canonical_x), Fq12::ONE);
@@ -421,4 +427,227 @@ fn exceptional_proofs_reveal_secret() {
         ("C doubling", with_c(&f.proof, c)),
         ("C cancellation", with_c(&f.proof, -c)),
     ]);
+}
+
+/// Knowledge of a, b with a * b = x1 and a + b = x2.
+#[derive(Clone)]
+struct MulAdd {
+    a: Option<Fr>,
+    b: Option<Fr>,
+}
+
+impl ConstraintSynthesizer<Fr> for MulAdd {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let a = self.a.ok_or(SynthesisError::AssignmentMissing);
+        let b = self.b.ok_or(SynthesisError::AssignmentMissing);
+        let a_var = cs.new_witness_variable(|| a)?;
+        let b_var = cs.new_witness_variable(|| b)?;
+        let x1 = cs.new_input_variable(|| Ok(a? * b?))?;
+        let x2 = cs.new_input_variable(|| Ok(a? + b?))?;
+        cs.enforce_constraint(lc!() + a_var, lc!() + b_var, lc!() + x1)?;
+        cs.enforce_constraint(lc!() + a_var + b_var, lc!() + Variable::One, lc!() + x2)
+    }
+}
+
+/// Knowledge of a with a * a = a, so no public inputs at all.
+#[derive(Clone)]
+struct Idempotent {
+    a: Option<Fr>,
+}
+
+impl ConstraintSynthesizer<Fr> for Idempotent {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let a = cs.new_witness_variable(|| self.a.ok_or(SynthesisError::AssignmentMissing))?;
+        cs.enforce_constraint(lc!() + a, lc!() + a, lc!() + a)
+    }
+}
+
+fn mul_add_setup(
+    rng: &mut StdRng,
+) -> (
+    ark_groth16::ProvingKey<Bn254>,
+    ark_groth16::VerifyingKey<Bn254>,
+) {
+    Groth16::<Bn254>::circuit_specific_setup(MulAdd { a: None, b: None }, rng).unwrap()
+}
+
+/// A proof of a * b = x1, a + b = x2, and its public inputs.
+fn mul_add_proof(
+    pk: &ark_groth16::ProvingKey<Bn254>,
+    rng: &mut StdRng,
+    a: u64,
+    b: u64,
+) -> (Proof<Bn254>, [Fr; 2]) {
+    let (a, b) = (Fr::from(a), Fr::from(b));
+    let proof = Groth16::<Bn254>::prove(
+        pk,
+        MulAdd {
+            a: Some(a),
+            b: Some(b),
+        },
+        rng,
+    )
+    .unwrap();
+    (proof, [a * b, a + b])
+}
+
+fn garble_with<const N: usize>(
+    rng: &mut StdRng,
+    seed: u64,
+    verifier_key: VerifierKey<N>,
+) -> (Fq, InputMacKey<N>, Table<N>) {
+    let secret = Fq::rand(rng);
+    let input_mac_key = InputMacKey::random_key(rng);
+    let gid = GID::random(rng);
+    let table = garble_groth16(seed, secret, verifier_key, &input_mac_key, gid).unwrap();
+    (secret, input_mac_key, table)
+}
+
+/// Constant public inputs are folded into `c`, so each statement gets its own
+/// garbling and the evaluator holds no labels for them.
+#[test]
+fn constant_inputs_change_per_garbling() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) = mul_add_setup(&mut rng);
+    let (proof1, inputs1) = mul_add_proof(&pk, &mut rng, 3, 11);
+    let (proof2, inputs2) = mul_add_proof(&pk, &mut rng, 5, 7);
+    let constant = |inputs: [Fr; 2]| inputs.map(PublicInput::Constant);
+    let vk1 = VerifierKey::<0>::from_groth16(&vk, &constant(inputs1)).unwrap();
+    let vk2 = VerifierKey::<0>::from_groth16(&vk, &constant(inputs2)).unwrap();
+    let (proof1, proof2) = (proof_input(&proof1, []), proof_input(&proof2, []));
+    assert_eq!(vk1.pairing(&proof1), Fq12::ONE);
+    assert_eq!(vk2.pairing(&proof2), Fq12::ONE);
+
+    let (secret1, key1, table1) = garble_with(&mut rng, SEED, vk1);
+    let (secret2, key2, table2) = garble_with(&mut rng, SEED + 1, vk2);
+    assert_replayed_keys(&table1, &key1, &garbler_keys(), &proof1);
+
+    assert_eq!(evaluate_table(&table1, &key1, &proof1).unwrap(), Fq::ZERO);
+    assert_eq!(evaluate_table(&table2, &key2, &proof2).unwrap(), Fq::ZERO);
+    // A valid proof for other constants is an invalid proof for this garbling.
+    assert_eq!(evaluate_table(&table1, &key1, &proof2).unwrap(), secret1);
+    assert_eq!(evaluate_table(&table2, &key2, &proof1).unwrap(), secret2);
+}
+
+#[test]
+fn zero_garbled_inputs_reveal_on_bad_proofs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) = mul_add_setup(&mut rng);
+    let (proof, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
+    let verifier_key =
+        VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
+    let proof = proof_input(&proof, []);
+    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+    let keys = garbler_keys();
+
+    let (A, B, C): (G1Affine, G2Affine, G1Affine) =
+        (proof.A.into(), proof.B.into(), proof.C.into());
+    let p = Fq::new_unchecked(Fq::MODULUS);
+    let a = doubling_input(&keys.a);
+    let b = doubling_input(&keys.b);
+    let c = doubling_input(&keys.c);
+    assert_reveals(
+        &table,
+        &key,
+        secret,
+        vec![
+            (
+                "A + G",
+                with_a(&proof, (A + G1Affine::generator()).into_affine()),
+            ),
+            (
+                "B + H",
+                with_b(&proof, (B + G2Affine::generator()).into_affine()),
+            ),
+            (
+                "C + G",
+                with_c(&proof, (C + G1Affine::generator()).into_affine()),
+            ),
+            (
+                "A.x = p",
+                Input {
+                    A: bivariate::Input { x: p, ..proof.A },
+                    ..proof
+                },
+            ),
+            (
+                "B outside G2",
+                with_b(&proof, off_subgroup_twist_point(&mut rng)),
+            ),
+            ("A doubling", with_a(&proof, a)),
+            ("B cancellation", with_b(&proof, -b)),
+            ("C doubling", with_c(&proof, c)),
+        ],
+    );
+}
+
+#[test]
+fn circuit_without_public_inputs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(Idempotent { a: None }, &mut rng).unwrap();
+    assert_eq!(vk.gamma_abc_g1.len(), 1);
+    let proof = Groth16::<Bn254>::prove(&pk, Idempotent { a: Some(Fr::ONE) }, &mut rng).unwrap();
+    let proof = proof_input(&proof, []);
+    let verifier_key = VerifierKey::<0>::from_groth16(&vk, &[]).unwrap();
+    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+
+    assert_eq!(evaluate_table(&table, &key, &proof).unwrap(), Fq::ZERO);
+    let C: G1Affine = proof.C.into();
+    let invalid = with_c(&proof, (C + G1Affine::generator()).into_affine());
+    assert_eq!(evaluate_table(&table, &key, &invalid).unwrap(), secret);
+}
+
+/// One input fixed at garbling time and one garbled.
+#[test]
+fn constant_and_garbled_inputs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) = mul_add_setup(&mut rng);
+    let (proof, [x1, x2]) = mul_add_proof(&pk, &mut rng, 3, 11);
+    let verifier_key =
+        VerifierKey::<1>::from_groth16(&vk, &[PublicInput::Constant(x1), PublicInput::Garbled])
+            .unwrap();
+    let proof = proof_input(&proof, [x2]);
+    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+
+    assert_eq!(evaluate_table(&table, &key, &proof).unwrap(), Fq::ZERO);
+    let wrong_x2 = Input {
+        x: [x2 + Fr::ONE],
+        ..proof
+    };
+    assert_eq!(evaluate_table(&table, &key, &wrong_x2).unwrap(), secret);
+}
+
+#[test]
+fn from_groth16_rejects_mismatched_inputs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (_, mut vk) = mul_add_setup(&mut rng);
+    let x = PublicInput::Constant(Fr::ONE);
+
+    assert_eq!(
+        VerifierKey::<0>::from_groth16(&vk, &[x]),
+        Err(VerifierKeyError::PublicInputLength {
+            expected: 2,
+            actual: 1
+        })
+    );
+    assert_eq!(
+        VerifierKey::<1>::from_groth16(&vk, &[x, x]),
+        Err(VerifierKeyError::GarbledInputCount {
+            expected: 1,
+            actual: 0
+        })
+    );
+    assert_eq!(
+        VerifierKey::<0>::from_groth16(&vk, &[x, PublicInput::Garbled]),
+        Err(VerifierKeyError::GarbledInputCount {
+            expected: 0,
+            actual: 1
+        })
+    );
+    vk.gamma_abc_g1.clear();
+    assert_eq!(
+        VerifierKey::<0>::from_groth16(&vk, &[]),
+        Err(VerifierKeyError::MissingConstantTerm)
+    );
 }

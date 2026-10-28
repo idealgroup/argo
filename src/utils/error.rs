@@ -16,6 +16,18 @@ pub enum GarbleError {
     MissingKScalar(&'static str),
 }
 
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierKeyError {
+    #[error("The verifying key has no gamma_abc_g1 constant term.")]
+    MissingConstantTerm,
+    #[error("Expected {expected} public inputs, got {actual}.")]
+    PublicInputLength { expected: usize, actual: usize },
+    #[error("Expected {expected} garbled public inputs, got {actual}.")]
+    GarbledInputCount { expected: usize, actual: usize },
+    #[error("The verifying key's pairing constant is zero.")]
+    DegenerateKey,
+}
+
 #[derive(Error, Debug)]
 pub enum EvalError {
     #[error("There was more than one collision in decoding.")]

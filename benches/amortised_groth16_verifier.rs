@@ -22,7 +22,7 @@ fn amortised_garble(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
 
     let verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
+        G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,

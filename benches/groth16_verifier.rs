@@ -26,11 +26,11 @@ fn invalid_snark(c: &mut Criterion) {
         A: G1Affine::rand(&mut rng).into(),
         B: G2Affine::rand(&mut rng).into(),
         C: G1Affine::rand(&mut rng).into(),
-        x: Fr::rand(&mut rng),
+        x: [Fr::rand(&mut rng)],
     };
 
     let verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
+        G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,

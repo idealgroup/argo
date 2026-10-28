@@ -9,7 +9,7 @@ use crate::{
         binary::less_than,
         bivariate::{self, Monomial, Poly},
         g2_subgroup_check,
-        groth16_verifier::{GID, Input, InputMac, KAPPA_B},
+        groth16_verifier::{GID, Input, InputMac, InputMacKey, KAPPA_B},
     },
     mac::{
         IteratedMac,
@@ -23,9 +23,9 @@ use crate::{
 };
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
-pub struct Table {
-    // Checks that `x` is a valid Fr element
-    x_range_check: less_than::Table<Fr>,
+pub struct Table<const N: usize> {
+    // Checks that each garbled `x_l` is a valid Fr element
+    x_range_check: [less_than::Table<Fr>; N],
     // Checks that `A.x`, `A.y` are valid Fq elements
     a_range_check: [less_than::Table<Fq>; 2],
     // Checks that A is a valid G1 curve point, leaking `secret` if not
@@ -51,12 +51,12 @@ pub(crate) struct Aux {
 }
 
 // TODO refactor to use Circuit trait?
-impl Table {
+impl<const N: usize> Table<N> {
     pub(crate) fn garble(
         parent_nonce: &mut crate::garble::Nonce,
         rng: &mut ark_std::rand::prelude::StdRng,
         aux: &Aux,
-        input_mac_key: &<InputMac as crate::mac::Mac<Input>>::Key,
+        input_mac_key: &InputMacKey<N>,
     ) -> Result<Self, GarbleError> {
         let Aux {
             secret,
@@ -168,15 +168,21 @@ impl Table {
         )?
         .0;
 
-        // Garbling table to check `x` is a valid Fr element.
-        // This table leaks `secret` if `x` is not a valid Fr element.
-        let x_range_check = less_than::Table::<Fr>::garble(
-            parent_nonce,
-            rng,
-            Some((*secret, *gid)),
-            &input_mac_key.x,
-        )?
-        .0;
+        // Garbling tables to check each `x_l` is a valid Fr element.
+        // These tables leak `secret` if `x_l` is not a valid Fr element.
+        let mut x_range_check = Vec::with_capacity(N);
+        for input_mac_key in &input_mac_key.x {
+            let table = less_than::Table::<Fr>::garble(
+                parent_nonce,
+                rng,
+                Some((*secret, *gid)),
+                input_mac_key,
+            )?
+            .0;
+            x_range_check.push(table);
+        }
+        // This unwrap cannot fail because there is one table per garbled input.
+        let x_range_check = x_range_check.try_into().unwrap_or_else(|_| panic!());
 
         let table = Self {
             x_range_check,
@@ -198,8 +204,8 @@ impl Table {
     pub(crate) fn evaluate_coordinates(
         &self,
         parent_nonce: &mut crate::garble::Nonce,
-        input: &Input,
-        input_mac: &InputMac,
+        input: &Input<N>,
+        input_mac: &InputMac<N>,
     ) -> Result<Option<Fq>, EvalError> {
         // The Groth16 input (A, B, C).
         let Input { A, B, C, x } = *input;
@@ -305,14 +311,13 @@ impl Table {
             return Ok(Some(c_curve_check * inv_curve_check_offset));
         }
 
-        // Evaluate the range check for `x`.
-        let x_range_check = self
-            .x_range_check
-            .evaluate(parent_nonce, &x, &input_mac.x)?
-            .0;
-        // If `x` is not a valid Fr element, return `secret` early
-        if !is_valid(x) {
-            return Ok(Some(x_range_check));
+        // Evaluate the range check for each `x_l`.
+        for ((table, x), input_mac) in self.x_range_check.iter().zip(&x).zip(&input_mac.x) {
+            let x_range_check = table.evaluate(parent_nonce, x, input_mac)?.0;
+            // If `x_l` is not a valid Fr element, return `secret` early
+            if !is_valid(*x) {
+                return Ok(Some(x_range_check));
+            }
         }
 
         Ok(None)
@@ -346,7 +351,7 @@ fn test_malformed_curve_points() {
         rand::{SeedableRng, rngs::StdRng},
     };
 
-    use crate::garble::{Nonce, groth16_verifier::InputMacKey};
+    use crate::garble::Nonce;
     use crate::mac::{Mac, MacKey, Random};
     use crate::utils::{
         aes_hash::{
@@ -477,7 +482,7 @@ fn test_malformed_curve_points() {
 
         let malformed_x = {
             let mut input = input;
-            input.x = Fr::new_unchecked(Fr::MODULUS);
+            input.x = [Fr::new_unchecked(Fr::MODULUS)];
             input
         };
 

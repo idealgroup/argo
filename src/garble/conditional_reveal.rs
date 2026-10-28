@@ -3,7 +3,7 @@
 //!
 //! When evaluated on an input != one and its MAC, it returns the `secret`.
 
-use ark_bn254::{Fq, Fq12, g2::Config as G2Config};
+use ark_bn254::{Fq, Fq12, Fr, g2::Config as G2Config};
 use ark_ec::scalar_mul::glv::GLVConfig;
 use ark_ff::{
     AdditiveGroup, BigInteger, Field, Fp12, PrimeField, batch_inversion,
@@ -45,11 +45,11 @@ impl<const KAPPA: usize> Table<KAPPA> {
     ///
     /// Panics if verifier_key.c == Fq12::ZERO, since `c` must be in the
     /// multiplicative subgroup of Fq12.
-    pub(crate) fn groth16_input_mac_key(
-        verifier_key: &groth16_verifier::VerifierKey,
+    pub(crate) fn groth16_input_mac_key<const N: usize>(
+        verifier_key: &groth16_verifier::VerifierKey<N>,
         pairing_output_mac_key: &[EndoMacKeyFq12; KAPPA],
         c_ec_mac_key: &[EndoMacKeyG1; KAPPA],
-        x_G_output_mac_key: &[EndoMacKeyG1; KAPPA],
+        x_G_output_mac_keys: &[[EndoMacKeyG1; KAPPA]; N],
     ) -> Result<InputMacKey<KAPPA>, GarbleError> {
         let GarblePreprocessedVk {
             h1_target_pow_2,
@@ -63,10 +63,10 @@ impl<const KAPPA: usize> Table<KAPPA> {
         let mut key = Vec::with_capacity(pairing_output_mac_key.len());
 
         // e(A,B) e(C, H_1) = c^{-1}
-        for ((AB, C), x_G) in pairing_output_mac_key
+        for (i, (AB, C)) in pairing_output_mac_key
             .iter()
             .zip(c_ec_mac_key.iter())
-            .zip(x_G_output_mac_key.iter())
+            .enumerate()
         {
             // All these MAC keys use the same phi
             let phi: EndoScalar<G2Config> = C.phi.clone().into();
@@ -74,36 +74,42 @@ impl<const KAPPA: usize> Table<KAPPA> {
                 .k_scalar
                 .ok_or(GarbleError::MissingKScalar("C"))?
                 .into_bigint();
-            let xG_k_scalar = x_G
-                .k_scalar
-                .ok_or(GarbleError::MissingKScalar("x_G"))?
-                .into_bigint();
 
             // e(G, H1)^{C_k_scalar}
             // This unwrap cannot fail because there are enough
             // `h1_target_pow_2` for Fr.
             let C_k_H1 = Fq12::pow_with_table(&h1_target_pow_2, C_k_scalar).unwrap();
 
-            // e(G, H2)^{xG_k_scalar}
-            // This unwrap cannot fail because there are enough
-            // `h1_target_pow_2` for Fr.
-            let xG_k_H2 = Fq12::pow_with_table(&h2_target_pow_2, xG_k_scalar).unwrap();
+            // e(G, H2)^{Σ_l xG_l_k_scalar}
+            let xG_k_H2 = if N == 0 {
+                Fq12::ONE
+            } else {
+                let mut xG_k_scalar = Fr::ZERO;
+                for keys in x_G_output_mac_keys {
+                    xG_k_scalar += keys[i].k_scalar.ok_or(GarbleError::MissingKScalar("x_G"))?;
+                }
+                // This unwrap cannot fail because there are enough
+                // `h2_target_pow_2` for Fr.
+                Fq12::pow_with_table(&h2_target_pow_2, xG_k_scalar.into_bigint()).unwrap()
+            };
 
             // e(C.k, H1) e(xG.k, H2)
             let k = C_k_H1 * xG_k_H2;
 
             #[cfg(test)]
             {
-                use ark_bn254::Bn254;
-                use ark_ec::pairing::Pairing;
+                use ark_bn254::{Bn254, G1Projective};
+                use ark_ec::{CurveGroup, pairing::Pairing};
 
                 assert_eq!(C_k_H1, Bn254::pairing(C.k, verifier_key.H1).0);
-                assert_eq!(xG_k_H2, Bn254::pairing(x_G.k, verifier_key.H2).0);
-
+                let xG_k: G1Projective = x_G_output_mac_keys.iter().map(|keys| keys[i].k).sum();
                 assert_eq!(
                     k,
-                    Bn254::multi_pairing(vec![C.k, x_G.k], vec![verifier_key.H1, verifier_key.H2])
-                        .0
+                    Bn254::multi_pairing(
+                        vec![C.k, xG_k.into_affine()],
+                        vec![verifier_key.H1, verifier_key.H2]
+                    )
+                    .0
                 );
             }
 
@@ -126,9 +132,8 @@ impl<const KAPPA: usize> Table<KAPPA> {
             });
         }
 
-        // This unwrap cannot fail because `pairing_output_mac_key`,
-        // `c_ec_mac_key`, `x_G_output_mac_key` are fixed arrays of size
-        // `KAPPA`.
+        // This unwrap cannot fail because `pairing_output_mac_key` and
+        // `c_ec_mac_key` are fixed arrays of size `KAPPA`.
         Ok(key.try_into().unwrap_or_else(|_| panic!()))
     }
 
@@ -297,7 +302,7 @@ fn test_preprocessed_pow_two() {
     let mut rng = StdRng::seed_from_u64(SEED);
 
     let verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
+        G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,
