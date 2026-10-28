@@ -24,7 +24,7 @@ use ark_ec::{
     AffineRepr, CurveGroup,
     short_weierstrass::{Affine, Projective},
 };
-use ark_ff::{AdditiveGroup, PrimeField};
+use ark_ff::{AdditiveGroup, CyclotomicMultSubgroup, Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::UniformRand;
 use num_bigint::BigInt;
@@ -69,7 +69,7 @@ use crate::{
 #[cfg(test)]
 use ark_std::rand::rngs::StdRng;
 #[cfg(any(test, feature = "groth16"))]
-use {ark_bn254::Bn254, ark_ec::pairing::Pairing, ark_ff::Field};
+use {ark_bn254::Bn254, ark_ec::pairing::Pairing};
 
 // KAPPA_B is 1 + log_7(2^128)
 pub const KAPPA_B: usize = 46 + 1;
@@ -683,29 +683,35 @@ impl<const N: usize> Table<N> {
                     .map_err(|_| EvalError::MalformedTable)
             };
 
-            let b_ddh_macs = [to_ddh_mac(&b_ec_mac)?, to_ddh_mac(&-b_ec_mac)?];
-            let prepared_c_ec_macs = [c_ec_mac.clone(), -c_ec_mac.clone()];
+            let mut AB_macs = Vec::with_capacity(2);
+            for b_ddh_mac in [to_ddh_mac(&b_ec_mac)?, to_ddh_mac(&-b_ec_mac)?] {
+                AB_macs.push(
+                    self.pairing
+                        .evaluate(&(A.into(), B.into()), &(a_ec_mac.clone(), b_ddh_mac))?,
+                );
+            }
+
+            // e(C, H1) e(x_G, H2) for +C and -C, using e(-C, H1) = e(C, H1)^-1.
+            let mut c_terms = [Vec::with_capacity(KAPPA_B), Vec::with_capacity(KAPPA_B)];
+            for (C, x_G) in c_ec_mac.iter().zip(&x_G_mac) {
+                let C_term = checked_multi_pairing([**C], [H1])?;
+                let x_G_term = if x_G.is_zero() {
+                    Fq12::ONE
+                } else {
+                    checked_multi_pairing([*x_G], [H2])?
+                };
+                let C_term_inverse = C_term
+                    .cyclotomic_inverse()
+                    .ok_or(EvalError::DegeneratePairing)?;
+                c_terms[0].push(C_term * x_G_term);
+                c_terms[1].push(C_term_inverse * x_G_term);
+            }
 
             let mut results = Vec::with_capacity(4); // 2 * 2 = 4 combinations
-
-            for b_ddh_mac in &b_ddh_macs {
-                for c_ec_mac in &prepared_c_ec_macs {
-                    let (_, AB_mac) = self.pairing.evaluate(
-                        &(A.into(), B.into()),
-                        &(a_ec_mac.clone(), b_ddh_mac.clone()),
-                    )?;
-
-                    let mut conditional_reveal_mac = Vec::with_capacity(KAPPA_B);
-                    for ((AB, C), x_G) in AB_mac.iter().zip(c_ec_mac.iter()).zip(&x_G_mac) {
-                        // Arkworks skips the identity, so N = 0 costs one
-                        // Miller loop.
-                        let pairing = checked_multi_pairing([**C, *x_G], [H1, H2])?;
-                        conditional_reveal_mac.push(EndoMacFq12::from(pairing * **AB));
-                    }
-                    let conditional_reveal_mac: [EndoMacFq12; KAPPA_B] = conditional_reveal_mac
-                        .try_into()
-                        .map_err(|_| EvalError::MalformedTable)?;
-
+            for AB_mac in &AB_macs {
+                for c_term in &c_terms {
+                    let conditional_reveal_mac: [EndoMacFq12; KAPPA_B] =
+                        std::array::from_fn(|i| EndoMacFq12::from(c_term[i] * *AB_mac[i]));
                     results.push(conditional_reveal_mac.into());
                 }
             }

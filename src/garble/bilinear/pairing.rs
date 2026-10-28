@@ -11,6 +11,8 @@ use ark_std::UniformRand;
 use num_bigint::BigInt;
 use rand_core::CryptoRngCore;
 
+#[cfg(test)]
+use crate::utils::group::checked_multi_pairing;
 use crate::{
     garble::groth16_verifier::{KAPPA_A, KAPPA_B},
     mac::{
@@ -23,7 +25,6 @@ use crate::{
         bits::pow_n_lincomb,
         constants::{R_MUL_COFACTOR_GENERATOR, TARGET_GENERATOR_POW_2},
         error::GarbleError,
-        group::checked_multi_pairing,
     },
 };
 
@@ -120,11 +121,9 @@ impl Table {
         &self,
         input: &Input,
         input_mac: &InputMac,
-    ) -> Result<(Output, OutputMac), crate::utils::error::EvalError> {
-        let (A, B) = input;
+    ) -> Result<OutputMac, crate::utils::error::EvalError> {
+        let (A, _) = input;
         let (A_mac, B_mac) = input_mac;
-
-        let output = checked_multi_pairing([*A], [*B])?;
 
         let S = GroupMac::<Affine<g1::Config>>(
             pow_n_lincomb(
@@ -136,7 +135,7 @@ impl Table {
 
         let output_mac = self.0.evaluate(A, &S, B_mac)?;
 
-        Ok((output, output_mac.into()))
+        Ok(output_mac.into())
     }
 }
 
@@ -244,7 +243,7 @@ fn test_pairing_circuit() {
         let (circuit, output_mac_key) = Table::garble(*rs, &input_mac_key).unwrap();
         let expected_output_mac = output_mac_key.encode(&output);
 
-        let output_mac = circuit.evaluate(&input, &input_mac).unwrap().1;
+        let output_mac = circuit.evaluate(&input, &input_mac).unwrap();
 
         for (expected, mac) in expected_output_mac.iter().zip(output_mac.iter()) {
             assert!(expected == mac);
