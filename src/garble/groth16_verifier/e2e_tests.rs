@@ -207,15 +207,39 @@ fn assert_replayed_keys<const N: usize>(
 
 /// The point P with phi(P) = K for the first replica with a nonzero phi.
 fn doubling_input<G: GLVConfig + PSqModR>(keys: &[EndoMacKey<G, Affine<G>>]) -> Affine<G> {
+    doubling_inputs(keys)[0].1
+}
+
+/// For every replica with a nonzero phi, its index and the point P with
+/// phi(P) = K.
+fn doubling_inputs<G: GLVConfig + PSqModR>(
+    keys: &[EndoMacKey<G, Affine<G>>],
+) -> Vec<(usize, Affine<G>)> {
     keys.iter()
-        .find_map(|key| {
+        .enumerate()
+        .filter_map(|(replica, key)| {
             EndoScalar::<G>::iter()
                 .into_iter()
                 .take(6)
                 .map(|inverse| inverse.endo(key.k))
                 .find(|point| key.phi.endo(*point) == key.k)
+                .map(|point| (replica, point))
         })
-        .unwrap()
+        .collect()
+}
+
+/// The doubling inputs of the second, a middle and the last replica that
+/// have one.
+fn later_doubling_inputs<G: GLVConfig + PSqModR>(
+    keys: &[EndoMacKey<G, Affine<G>>],
+) -> [(usize, Affine<G>); 3] {
+    let inputs = doubling_inputs(keys);
+    assert!(inputs.len() > 3);
+    [
+        inputs[1],
+        inputs[inputs.len() / 2],
+        inputs[inputs.len() - 1],
+    ]
 }
 
 fn evaluate_table<const N: usize>(
@@ -449,6 +473,64 @@ fn exceptional_proofs_reveal_secret() {
         ("C doubling", with_c(&f.proof, c)),
         ("C cancellation", with_c(&f.proof, -c)),
     ]);
+}
+
+/// Every replica has its own doubling ciphertext, so the cases above must
+/// reveal at replicas other than the first too.
+#[test]
+fn exceptional_proofs_at_later_replicas_reveal_secret() {
+    let f = fixture();
+    let mut cases = Vec::new();
+    for (replica, a) in later_doubling_inputs(&f.keys.a) {
+        cases.push((format!("A doubling at {replica}"), with_a(&f.proof, a)));
+        cases.push((format!("A cancellation at {replica}"), with_a(&f.proof, -a)));
+    }
+    for (replica, b) in later_doubling_inputs(&f.keys.b) {
+        cases.push((format!("B doubling at {replica}"), with_b(&f.proof, b)));
+        cases.push((format!("B cancellation at {replica}"), with_b(&f.proof, -b)));
+    }
+    for (replica, c) in later_doubling_inputs(&f.keys.c) {
+        cases.push((format!("C doubling at {replica}"), with_c(&f.proof, c)));
+        cases.push((format!("C cancellation at {replica}"), with_c(&f.proof, -c)));
+    }
+    assert_reveal(
+        cases
+            .iter()
+            .map(|(name, input)| (name.as_str(), *input))
+            .collect(),
+    );
+}
+
+/// C cancellation makes both signs of C match at one replica, which loses it,
+/// and the checksum can repair only one lost replica. Exceptional A or B
+/// inputs aimed at a second replica must still reveal the secret.
+#[test]
+fn c_cancellation_with_a_second_exceptional_replica_reveals_secret() {
+    let f = fixture();
+    let (c_replica, c) = doubling_inputs(&f.keys.c)[0];
+    let cancelled = with_c(&f.proof, -c);
+    let mut cases = Vec::new();
+    for (replica, a) in later_doubling_inputs(&f.keys.a) {
+        cases.push((format!("A doubling at {replica}"), with_a(&cancelled, a)));
+        cases.push((
+            format!("A cancellation at {replica}"),
+            with_a(&cancelled, -a),
+        ));
+    }
+    for (replica, b) in later_doubling_inputs(&f.keys.b) {
+        assert_ne!(replica, c_replica);
+        cases.push((format!("B doubling at {replica}"), with_b(&cancelled, b)));
+        cases.push((
+            format!("B cancellation at {replica}"),
+            with_b(&cancelled, -b),
+        ));
+    }
+    assert_reveal(
+        cases
+            .iter()
+            .map(|(name, input)| (name.as_str(), *input))
+            .collect(),
+    );
 }
 
 /// Knowledge of a, b with a * b = x1 and a + b = x2.
