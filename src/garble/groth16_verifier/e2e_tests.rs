@@ -861,6 +861,26 @@ fn labels_from_pairs_match_encoding() {
 }
 
 #[test]
+fn debug_output_redacts_secrets() {
+    use crate::mac::bit::bytes::{Bit16ByteMac, Bit16ByteMacKey};
+
+    let f = fixture();
+    let input_mac = format!("{:?}", f.garbling.input_mac_key.encode(&f.proof));
+    for [zero, one] in f.garbling.input_mac_key.label_pairs() {
+        assert!(!input_mac.contains(&format!("{zero:?}")));
+        assert!(!input_mac.contains(&format!("{one:?}")));
+    }
+    assert!(input_mac.contains("Bit16ByteMac(..)"));
+
+    let key = Bit16ByteMacKey {
+        phi: [1; 16],
+        k: [2; 16],
+    };
+    assert_eq!(format!("{key:?}"), "Bit16ByteMacKey(..)");
+    assert_eq!(format!("{:?}", Bit16ByteMac([3; 16])), "Bit16ByteMac(..)");
+}
+
+#[test]
 fn non_canonical_bits_without_garbled_inputs() {
     let mut rng = StdRng::seed_from_u64(SEED);
     let (pk, vk) = mul_add_setup(&mut rng);

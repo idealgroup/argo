@@ -4,13 +4,27 @@ use derive_more::{Deref, From};
 use rand_core::CryptoRngCore;
 
 /// MAC from a bit to a 16-byte word
-#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq, From, Deref)]
+#[derive(Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq, From, Deref)]
 pub(crate) struct Bit16ByteMac(pub(crate) [u8; 16]);
 
-#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq)]
+#[derive(Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq)]
 pub(crate) struct Bit16ByteMacKey {
     pub(crate) phi: [u8; 16],
     pub(crate) k: [u8; 16],
+}
+
+/// Redacted: a label must not reach logs.
+impl std::fmt::Debug for Bit16ByteMac {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bit16ByteMac(..)")
+    }
+}
+
+/// Redacted: the key holds both labels of a bit.
+impl std::fmt::Debug for Bit16ByteMacKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bit16ByteMacKey(..)")
+    }
 }
 
 impl Bit16ByteMacKey {
