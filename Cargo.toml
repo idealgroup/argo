@@ -16,7 +16,7 @@ ark-bn254 = "0.6.0"
 ark-serialize = "0.6.0"
 rand_core = "0.6.4"
 rand_chacha = "0.3.1"
-blake3 = { version = "1.8.2", features = [ "traits-preview" ]}
+blake3 = "1.8.2"
 aes = "0.8.4"
 derive_more = { version = "2.1.0", features = [ "from", "deref" ]}
 num-bigint = "0.4.6"

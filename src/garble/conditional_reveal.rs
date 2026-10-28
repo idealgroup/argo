@@ -5,10 +5,7 @@
 
 use ark_bn254::{Bn254, Fq, Fq12, Fr, G1Affine, G2Affine, g2::Config as G2Config};
 use ark_ec::{AffineRepr, pairing::Pairing, scalar_mul::glv::GLVConfig};
-use ark_ff::{
-    AdditiveGroup, BigInteger, Field, Fp12, PrimeField, batch_inversion,
-    field_hashers::{DefaultFieldHasher, HashToField},
-};
+use ark_ff::{AdditiveGroup, BigInteger, Field, Fp12, PrimeField, batch_inversion};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::{
@@ -18,6 +15,7 @@ use crate::{
         endo::{ENDO_SIZE, Endo, EndoMacKeyFq12, EndoMacKeyG1, EndoScalar, IteratedEndoMacFq12},
     },
     utils::{
+        aes_hash::LEN_PER_BASE_ELEM,
         error::{EvalError, GarbleError},
         try_unwrap_single,
     },
@@ -149,9 +147,39 @@ impl<const KAPPA: usize> Table<KAPPA> {
         I::IntoIter: DoubleEndedIterator,
     {
         let packed_phis = EndoScalar::<C>::pack(phis);
-        let hasher = <DefaultFieldHasher<blake3::Hasher> as HashToField<Fq>>::new(&[]);
-        hasher.hash_to_field::<1>(&packed_phis.into_bigint().to_bytes_le())[0]
+        hash_to_fq(&packed_phis.into_bigint().to_bytes_le())
     }
+}
+
+/// expand_message_xmd with blake3 and an empty DST, reduced into `Fq`. This is
+/// ark-ff's `DefaultFieldHasher<blake3::Hasher>`, whose zero pad is
+/// `LEN_PER_BASE_ELEM` bytes rather than the hash block size.
+fn hash_to_fq(msg: &[u8]) -> Fq {
+    // The empty DST, then its length.
+    const DST: [u8; 1] = [0];
+    let b0 = blake3::Hasher::new()
+        .update(&[0; LEN_PER_BASE_ELEM])
+        .update(msg)
+        .update(&(LEN_PER_BASE_ELEM as u16).to_be_bytes())
+        .update(&[0])
+        .update(&DST)
+        .finalize();
+    let b1 = blake3::Hasher::new()
+        .update(b0.as_bytes())
+        .update(&[1])
+        .update(&DST)
+        .finalize();
+    let b0_xor_b1: [u8; 32] = std::array::from_fn(|i| b0.as_bytes()[i] ^ b1.as_bytes()[i]);
+    let b2 = blake3::Hasher::new()
+        .update(&b0_xor_b1)
+        .update(&[2])
+        .update(&DST)
+        .finalize();
+
+    let mut uniform_bytes = [0; 64];
+    uniform_bytes[..32].copy_from_slice(b1.as_bytes());
+    uniform_bytes[32..].copy_from_slice(b2.as_bytes());
+    Fq::from_be_bytes_mod_order(&uniform_bytes[..LEN_PER_BASE_ELEM])
 }
 
 impl<const KAPPA: usize> Table<KAPPA> {
