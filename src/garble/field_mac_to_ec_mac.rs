@@ -9,13 +9,12 @@ use std::any::type_name;
 
 #[cfg(test)]
 use crate::garble::groth16_verifier::{KAPPA_A, KAPPA_B};
-#[cfg(test)]
-use ark_bn254::Fq;
 
+use ark_bn254::Fq;
 use ark_ec::{AffineRepr, scalar_mul::glv::GLVConfig, short_weierstrass::Affine};
 use ark_ff::{Field, batch_inversion};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use ark_std::rand::{RngCore, rngs::StdRng};
 
 use crate::{
     garble::{
@@ -23,8 +22,8 @@ use crate::{
         bivariate::{self, Input, InputMac, InputMacKey, Poly},
     },
     mac::{
-        Random, RandomFromPhi,
-        endo::{EndoMac, EndoMacKey, IteratedEndoMac, PSqModR},
+        MacKey, Random, RandomFromPhi,
+        endo::{Endo, EndoMac, EndoMacKey, EndoScalar, IteratedEndoMac, PSqModR},
     },
     utils::{
         bits::{FromBits, NumBits, ToBits},
@@ -49,6 +48,54 @@ where
     pub(crate) x: Vec<bivariate::Table<C::BaseField>>,
     pub(crate) y: Option<Vec<bivariate::Table<C::BaseField>>>,
     pub(crate) z: Vec<bivariate::Table<C::BaseField>>,
+    // Per replica, the secret encrypted under the input labels of
+    // phi^{-1}(K), the one input where the chord formula yields (0, 0, 0).
+    pub(crate) doubling: Vec<[u8; 48]>,
+}
+
+/// Hash of the labels of every input bit, which only the evaluator holding
+/// those labels can compute.
+fn label_digest<F>(input_mac: &InputMac<F>) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new_derive_key("argo field_mac_to_ec_mac doubling v1");
+    for label in input_mac.x.iter().chain(input_mac.y.iter()) {
+        hasher.update(&label.0);
+    }
+    hasher.finalize()
+}
+
+fn apply_doubling_pad(bytes: &mut [u8; 48], labels: &blake3::Hash, replica: usize) {
+    let mut hasher = blake3::Hasher::new_keyed(labels.as_bytes());
+    hasher.update(&(replica as u64).to_le_bytes());
+    let mut pad = [0; 48];
+    hasher.finalize_xof().fill(&mut pad);
+    bytes
+        .iter_mut()
+        .zip(pad)
+        .for_each(|(byte, pad)| *byte ^= pad);
+}
+
+impl<C, const KAPPA: usize> Table<C, KAPPA>
+where
+    C: GLVConfig,
+    C::BaseField: Field + NumBits + FromBits<bool, C::BaseField> + Random,
+    <C::BaseField as Field>::BasePrimeField: FromLeBytesModOrder,
+{
+    /// Returns the secret if `input_mac` holds the labels of some replica's
+    /// doubling input, for which the converted MAC would be meaningless.
+    pub(crate) fn reveal(&self, input_mac: &InputMac<C::BaseField>) -> Option<Fq> {
+        let labels = label_digest(input_mac);
+        self.doubling
+            .iter()
+            .enumerate()
+            .find_map(|(replica, ciphertext)| {
+                let mut plaintext = *ciphertext;
+                apply_doubling_pad(&mut plaintext, &labels, replica);
+                if plaintext[32..] != [0; 16] {
+                    return None;
+                }
+                Fq::deserialize_compressed(&plaintext[..32]).ok()
+            })
+    }
 }
 
 impl<Config, F, const KAPPA: usize>
@@ -62,7 +109,7 @@ where
     EndoMacKey<Config, Affine<Config>>:
         RandomFromPhi<Affine<Config>, EndoMac<Config, Affine<Config>>>,
 {
-    type Aux = (bool, OutputMacKey<Config, KAPPA>);
+    type Aux = (bool, OutputMacKey<Config, KAPPA>, Fq);
 
     /// # Panics
     ///
@@ -76,7 +123,7 @@ where
         assert_eq!(Config::COEFF_A, F::ZERO);
 
         let mut nonce = parent_nonce.fork();
-        let (is_full, output_mac_key) = aux
+        let (is_full, output_mac_key, secret) = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
 
         fn x_aux<C, F>(mac_key: &EndoMacKey<C, Affine<C>>, a2: F) -> Result<Poly<F>, GarbleError>
@@ -184,8 +231,9 @@ where
         let mut x = Vec::with_capacity(output_mac_key.len());
         let mut y = Vec::with_capacity(output_mac_key.len());
         let mut z = Vec::with_capacity(output_mac_key.len());
+        let mut doubling = Vec::with_capacity(output_mac_key.len());
 
-        for key in output_mac_key.iter() {
+        for (replica, key) in output_mac_key.iter().enumerate() {
             // Generate random scalar `a`
             let a = F::rand(rng);
 
@@ -213,6 +261,23 @@ where
                 .0;
                 y.push(y_table);
             }
+
+            // Only the holder of phi^{-1}(K)'s labels can decrypt `secret`.
+            let doubling_input = EndoScalar::<Config>::iter()
+                .into_iter()
+                .take(6)
+                .map(|inverse| inverse.endo(key.k))
+                .find(|point| key.phi.endo(*point) == key.k);
+            let mut ciphertext = [0; 48];
+            match doubling_input {
+                Some(point) => {
+                    secret.serialize_compressed(&mut ciphertext[..32]).unwrap();
+                    let labels = label_digest(&input_mac_key.encode(&point.into()));
+                    apply_doubling_pad(&mut ciphertext, &labels, replica);
+                }
+                None => rng.fill_bytes(&mut ciphertext),
+            }
+            doubling.push(ciphertext);
         }
 
         Ok((
@@ -221,6 +286,7 @@ where
                 x,
                 y: if is_full { Some(y) } else { None },
                 z,
+                doubling,
             },
             output_mac_key.clone(),
         ))
@@ -264,11 +330,25 @@ where
         let mut zs_inv = zs;
         batch_inversion(&mut zs_inv);
 
+        // Z = 0 exactly when phi(P) = -K, whose sum is the identity, or when
+        // phi(P) = K, where X = 0 too and only `reveal` is meaningful.
+        if xs
+            .iter()
+            .zip(&zs_inv)
+            .any(|(x, z_inv)| x.is_zero() && z_inv.is_zero())
+        {
+            return Err(EvalError::DoublingInput);
+        }
+
         let mut macs = Vec::with_capacity(KAPPA);
         xs.into_iter()
             .zip(zs_inv)
             .enumerate()
             .for_each(|(idx, (x, z_inv))| {
+                if z_inv.is_zero() {
+                    macs.push(EndoMac::from(Affine::identity()));
+                    return;
+                }
                 // Use Jacobian coordinates, so x / z^2, y / z^3
                 let z2 = z_inv.square();
                 let x = x * z2;
@@ -330,7 +410,7 @@ where
     let garbling_table = Table::garble(
         &mut Nonce::new(),
         &mut rng,
-        Some((is_full, output_mac_key)),
+        Some((is_full, output_mac_key, Fq::from(42u64))),
         &input_mac_key,
     )
     .unwrap()
@@ -410,7 +490,7 @@ where
     let original_table = Table::<C, KAPPA>::garble(
         &mut Nonce::new(),
         &mut rng,
-        Some((is_full, output_mac_key)),
+        Some((is_full, output_mac_key, Fq::from(42u64))),
         &input_mac_key,
     )
     .unwrap()

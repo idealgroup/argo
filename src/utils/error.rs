@@ -26,6 +26,8 @@ pub enum EvalError {
     DigitMacReconstructionError,
     #[error("Missing y tables for field_mac_to_ec_mac.")]
     MissingYTablesError,
+    #[error("Input is the doubling point of a field_mac_to_ec_mac replica.")]
+    DoublingInput,
     #[error("Missing global identifier in {0}")]
     MissingGID(&'static str),
     #[error("Missing DST in Encrypt<AesMiTCCR, Mac1>::decrypt")]

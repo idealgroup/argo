@@ -337,7 +337,7 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
             parent_nonce,
             rng,
             // The a_ec_mac_key that we sampled earlier
-            Some((true, a_ec_mac_key.clone())),
+            Some((true, a_ec_mac_key.clone(), secret)),
             // Input MAC key for the (x, y) coordinates of `A`
             &input_mac_key.A,
         )?
@@ -348,7 +348,7 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
             parent_nonce,
             rng,
             // The b_ec_mac_key that we sampled earlier
-            Some((false, b_ec_mac_key.clone())),
+            Some((false, b_ec_mac_key.clone(), secret)),
             // Input MAC key for the (x, y) coordinates of `B`
             &input_mac_key.B,
         )?
@@ -359,7 +359,7 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
             parent_nonce,
             rng,
             // The c_ec_mac_key that we sampled earlier
-            Some((false, c_ec_mac_key.clone())),
+            Some((false, c_ec_mac_key.clone(), secret)),
             // Input MAC key for the (x, y) coordinates of `C`
             &input_mac_key.C,
         )?
@@ -428,6 +428,16 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
         if let Some(secret) =
             self.input_validity
                 .evaluate_coordinates(parent_nonce, input, input_mac)?
+        {
+            return Ok((secret, IdentityMac(PhantomData)));
+        }
+
+        // A point that hits a conversion's doubling case releases the secret.
+        if let Some(secret) = self
+            .a_ec_mac
+            .reveal(&input_mac.A)
+            .or_else(|| self.b_ec_mac.reveal(&input_mac.B))
+            .or_else(|| self.c_ec_mac.reveal(&input_mac.C))
         {
             return Ok((secret, IdentityMac(PhantomData)));
         }
