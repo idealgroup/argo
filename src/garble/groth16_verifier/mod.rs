@@ -8,6 +8,9 @@
 
 pub(crate) mod input_validity;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use core::panic;
 use std::{any::type_name, marker::PhantomData};
 

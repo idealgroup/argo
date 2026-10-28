@@ -23,6 +23,9 @@ rustc-hash = "2.1.1"
 [dev-dependencies]
 criterion = "0.7.0"
 mimalloc = "0.1.48"
+ark-groth16 = "0.5.0"
+ark-relations = "0.5.1"
+ark-snark = "0.5.1"
 
 [profile.release]
 opt-level = 3
