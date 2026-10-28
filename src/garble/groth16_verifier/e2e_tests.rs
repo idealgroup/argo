@@ -11,7 +11,7 @@ use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, G1Affine, G2Affine, g2};
 use ark_ec::{
     AffineRepr, CurveGroup, scalar_mul::glv::GLVConfig, short_weierstrass::SWCurveConfig,
 };
-use ark_ff::{Field, PrimeField, Zero};
+use ark_ff::{BigInt, BigInteger, Field, PrimeField, Zero};
 use ark_groth16::{Groth16, Proof};
 use ark_relations::{
     lc,
@@ -27,6 +27,7 @@ use super::*;
 use crate::{
     garble::keys::{a_ec_mac_key, b_mac_key},
     mac::endo::{Endo, EndoMacKey, PSqModR},
+    utils::error::InputError,
 };
 
 const SEED: u64 = 7;
@@ -152,9 +153,9 @@ fn assert_replayed_keys<const N: usize>(
     assert!(
         table
             .input_validity
-            .evaluate_coordinates(&mut nonce, input, &input_mac)
+            .evaluate_coordinates(&mut nonce, &InputBits::from(input), &input_mac)
             .unwrap()
-            .is_none()
+            .is_ok()
     );
     let a_mac = table
         .a_ec_mac
@@ -650,4 +651,125 @@ fn from_groth16_rejects_mismatched_inputs() {
         VerifierKey::<0>::from_groth16(&vk, &[]),
         Err(VerifierKeyError::MissingConstantTerm)
     );
+}
+
+fn with_component<const N: usize>(
+    bits: &InputBits<N>,
+    index: usize,
+    value: BigInt<4>,
+) -> InputBits<N> {
+    let mut raw = bits.bits().to_vec();
+    raw[index * COMPONENT_BITS..(index + 1) * COMPONENT_BITS]
+        .copy_from_slice(&value.to_bits_le()[..COMPONENT_BITS]);
+    InputBits::new(raw).unwrap()
+}
+
+fn evaluate_raw<const N: usize>(
+    table: &Table<N>,
+    input_mac_key: &InputMacKey<N>,
+    bits: &InputBits<N>,
+) -> Result<Fq, EvalError> {
+    let input_mac = input_mac_key.encode_bits(bits);
+    aes_ctr_clear_set();
+    aes_mitccr_clear_set();
+    let output = table.evaluate_bits(&mut Nonce::new(), bits, &input_mac);
+    aes_ctr_clear_set();
+    aes_mitccr_clear_set();
+    output
+}
+
+/// Assert can sign any bits, including a component at or above its modulus.
+/// Every such component must reveal the secret, even when it reduces to the
+/// valid proof's value.
+#[test]
+fn non_canonical_bits_reveal_secret() {
+    let f = fixture();
+    let valid = InputBits::from(&f.proof);
+    let names = [
+        "A.x", "A.y", "B.x.c0", "B.x.c1", "B.y.c0", "B.y.c1", "C.x", "C.y", "x",
+    ];
+    let mut failures = Vec::new();
+    let mut shifted_cases = 0;
+    for (index, name) in names.into_iter().enumerate() {
+        let modulus = if index < 8 { Fq::MODULUS } else { Fr::MODULUS };
+        let mut plus_one = modulus;
+        plus_one.add_with_carry(&BigInt::one());
+        let mut values = vec![
+            ("modulus", modulus),
+            ("modulus + 1", plus_one),
+            ("2^254 - 1", BigInt::from_bits_le(&[true; COMPONENT_BITS])),
+        ];
+        let component = &valid.bits()[index * COMPONENT_BITS..(index + 1) * COMPONENT_BITS];
+        let mut shifted = BigInt::<4>::from_bits_le(component);
+        shifted.add_with_carry(&modulus);
+        if shifted.num_bits() as usize <= COMPONENT_BITS {
+            values.push(("valid value + modulus", shifted));
+            shifted_cases += 1;
+        }
+
+        for (value_name, value) in values {
+            let bits = with_component(&valid, index, value);
+            match evaluate_raw(&f.table, &f.input_mac_key, &bits) {
+                Ok(output) if output == f.secret => {}
+                output => failures.push(format!("{name} = {value_name}: {output:?}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "secret not revealed: {failures:#?}");
+    assert!(shifted_cases > 0);
+}
+
+#[test]
+fn labels_from_pairs_match_encoding() {
+    let f = fixture();
+    let bits = InputBits::from(&f.proof);
+    let pairs = f.input_mac_key.label_pairs();
+    assert_eq!(pairs.len(), InputBits::<1>::LEN);
+    let labels: Vec<_> = pairs
+        .iter()
+        .zip(bits.bits())
+        .map(|(pair, bit)| pair[*bit as usize])
+        .collect();
+    let input_mac = InputMac::from_labels(&labels).unwrap();
+    assert_eq!(input_mac, f.input_mac_key.encode(&f.proof));
+    assert_eq!(input_mac, f.input_mac_key.encode_bits(&bits));
+    assert_eq!(
+        evaluate_raw(&f.table, &f.input_mac_key, &bits).unwrap(),
+        Fq::ZERO
+    );
+
+    assert_eq!(InputBits::<0>::LEN, 2032);
+    assert_eq!(
+        InputBits::<1>::new(vec![false; 3]),
+        Err(InputError::BitCount {
+            expected: 2286,
+            actual: 3
+        })
+    );
+    assert_eq!(
+        InputMac::<1>::from_labels(&labels[1..]),
+        Err(InputError::LabelCount {
+            expected: 2286,
+            actual: 2285
+        })
+    );
+}
+
+#[test]
+fn non_canonical_bits_without_garbled_inputs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) = mul_add_setup(&mut rng);
+    let (proof, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
+    let verifier_key =
+        VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
+    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+    let valid = InputBits::from(&proof_input(&proof, []));
+    assert_eq!(evaluate_raw(&table, &key, &valid).unwrap(), Fq::ZERO);
+
+    for index in 0..8 {
+        let mut plus_one = Fq::MODULUS;
+        plus_one.add_with_carry(&BigInt::one());
+        let bits = with_component(&valid, index, plus_one);
+        assert_eq!(evaluate_raw(&table, &key, &bits).unwrap(), secret);
+    }
 }

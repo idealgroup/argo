@@ -47,13 +47,15 @@ use crate::{
     },
     mac::{
         IdentityMac, IdentityMacKey, IteratedMac, Mac, MacKey, RandomFromPhi,
+        bit::bytes::{Bit16ByteMac, Bit16ByteMacKey},
         ddh::DDHMac,
         digit,
         endo::{EndoMacFq12, EndoMacG2, EndoMacKeyG1, EndoScalar},
     },
     utils::{
+        bits::ToBits,
         constants::R_MUL_COFACTOR_GENERATOR,
-        error::{EvalError, GarbleError},
+        error::{EvalError, GarbleError, InputError},
     },
 };
 
@@ -232,6 +234,56 @@ impl<const N: usize> Input<N> {
     }
 }
 
+/// Bits in each proof component: a coordinate in Fq or a public input in Fr.
+pub const COMPONENT_BITS: usize = Fq::MODULUS_BIT_SIZE as usize;
+const _: () = assert!(Fr::MODULUS_BIT_SIZE as usize == COMPONENT_BITS);
+
+/// A, B and C have 8 base-field coordinates.
+const POINT_COMPONENTS: usize = 8;
+
+/// The clear proof as raw bits, in label order: A.x, A.y, B.x.c0, B.x.c1,
+/// B.y.c0, B.y.c1, C.x, C.y, then each garbled public input, every component
+/// least significant bit first. A component need not be below its modulus; one
+/// that isn't reveals the secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBits<const N: usize = 1>(Vec<bool>);
+
+impl<const N: usize> InputBits<N> {
+    pub const LEN: usize = (POINT_COMPONENTS + N) * COMPONENT_BITS;
+
+    pub fn new(bits: Vec<bool>) -> Result<Self, InputError> {
+        if bits.len() != Self::LEN {
+            return Err(InputError::BitCount {
+                expected: Self::LEN,
+                actual: bits.len(),
+            });
+        }
+        Ok(Self(bits))
+    }
+
+    pub fn bits(&self) -> &[bool] {
+        &self.0
+    }
+
+    fn component(&self, index: usize) -> &[bool] {
+        &self.0[index * COMPONENT_BITS..(index + 1) * COMPONENT_BITS]
+    }
+}
+
+impl<const N: usize> From<&Input<N>> for InputBits<N> {
+    fn from(input: &Input<N>) -> Self {
+        let Input { A, B, C, x } = input;
+        let mut bits = Vec::with_capacity(Self::LEN);
+        for component in [A.x, A.y, B.x.c0, B.x.c1, B.y.c0, B.y.c1, C.x, C.y] {
+            bits.extend(component.to_bits());
+        }
+        for x in x {
+            bits.extend(x.to_bits());
+        }
+        Self(bits)
+    }
+}
+
 /// Input MAC key from the Groth16 proof.
 #[derive(Clone)]
 pub struct InputMacKey<const N: usize = 1> {
@@ -242,7 +294,7 @@ pub struct InputMacKey<const N: usize = 1> {
 }
 
 /// Input MAC of the Groth16 proof.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputMac<const N: usize = 1> {
     A: bivariate::InputMac<Fq>,
     B: bivariate::InputMac<Fq2>,
@@ -251,6 +303,71 @@ pub struct InputMac<const N: usize = 1> {
 }
 
 type Output = conditional_reveal::Output;
+
+/// A 16-byte label of one input bit.
+pub type Label = [u8; 16];
+
+impl<const N: usize> InputMacKey<N> {
+    fn bit_keys(&self) -> impl Iterator<Item = &Bit16ByteMacKey> {
+        let Self { A, B, C, x } = self;
+        let keys: [&[Bit16ByteMacKey]; 6] = [&A.x, &A.y, &B.x, &B.y, &C.x, &C.y];
+        keys.into_iter()
+            .chain(x.iter().map(|key| &key[..]))
+            .flatten()
+    }
+
+    /// The labels of 0 and of 1 for every input bit, in [`InputBits`] order.
+    pub fn label_pairs(&self) -> Vec<[Label; 2]> {
+        self.bit_keys()
+            .map(|key| [*key.encode(&false), *key.encode(&true)])
+            .collect()
+    }
+
+    /// The labels of `bits`, which need not spell canonical field elements.
+    pub fn encode_bits(&self, bits: &InputBits<N>) -> InputMac<N> {
+        InputMac::collect(
+            self.bit_keys()
+                .zip(bits.bits())
+                .map(|(key, bit)| key.encode(bit)),
+        )
+    }
+}
+
+impl<const N: usize> InputMac<N> {
+    /// Builds the input MAC from one label per bit, in [`InputBits`] order.
+    pub fn from_labels(labels: &[Label]) -> Result<Self, InputError> {
+        let expected = InputBits::<N>::LEN;
+        if labels.len() != expected {
+            return Err(InputError::LabelCount {
+                expected,
+                actual: labels.len(),
+            });
+        }
+
+        Ok(Self::collect(
+            labels.iter().map(|label| Bit16ByteMac::from(*label)),
+        ))
+    }
+
+    /// Splits one MAC per bit, in [`InputBits`] order, into components.
+    fn collect(mut labels: impl Iterator<Item = Bit16ByteMac>) -> Self {
+        let mut take = |bits: usize| labels.by_ref().take(bits).collect::<Vec<_>>();
+        let A = bivariate::InputMac {
+            x: take(COMPONENT_BITS).into(),
+            y: take(COMPONENT_BITS).into(),
+        };
+        let B = bivariate::InputMac {
+            x: take(2 * COMPONENT_BITS).into(),
+            y: take(2 * COMPONENT_BITS).into(),
+        };
+        let C = bivariate::InputMac {
+            x: take(COMPONENT_BITS).into(),
+            y: take(COMPONENT_BITS).into(),
+        };
+        let x = std::array::from_fn(|_| take(COMPONENT_BITS).into());
+        Self { A, B, C, x }
+    }
+}
 
 impl<const N: usize> MacKey<Input<N>, InputMac<N>> for InputMacKey<N> {
     fn encode(&self, value: &Input<N>) -> InputMac<N> {
@@ -498,16 +615,30 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
         input: &Input<N>,
         input_mac: &InputMac<N>,
     ) -> Result<(Output, IdentityMac<Output>), EvalError> {
-        // The Groth16 input (A, B, C).
-        let Input { A, B, C, x } = *input;
-        let VerifierKey { H1, H2, .. } = self.verifier_key;
+        self.evaluate_bits(parent_nonce, &InputBits::from(input), input_mac)
+            .map(|secret| (secret, IdentityMac(PhantomData)))
+    }
+}
 
-        if let Some(secret) =
-            self.input_validity
-                .evaluate_coordinates(parent_nonce, input, input_mac)?
+impl<const N: usize> Table<N> {
+    /// Evaluates on the raw proof bits and their labels. Returns the secret
+    /// for an invalid proof and `Fq::ZERO` for a valid one.
+    pub fn evaluate_bits(
+        &self,
+        parent_nonce: &mut Nonce,
+        bits: &InputBits<N>,
+        input_mac: &InputMac<N>,
+    ) -> Result<Output, EvalError> {
+        let input = match self
+            .input_validity
+            .evaluate_coordinates(parent_nonce, bits, input_mac)?
         {
-            return Ok((secret, IdentityMac(PhantomData)));
-        }
+            Ok(input) => input,
+            Err(secret) => return Ok(secret),
+        };
+        // The Groth16 input (A, B, C).
+        let Input { A, B, C, x } = input;
+        let VerifierKey { H1, H2, .. } = self.verifier_key;
 
         // A point that hits a conversion's doubling case releases the secret.
         if let Some(secret) = self
@@ -516,7 +647,7 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
             .or_else(|| self.b_ec_mac.reveal(&input_mac.B))
             .or_else(|| self.c_ec_mac.reveal(&input_mac.C))
         {
-            return Ok((secret, IdentityMac(PhantomData)));
+            return Ok(secret);
         }
 
         // Evaluate the field_to_ec_mac table for `A`.
@@ -529,7 +660,7 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
             self.input_validity
                 .evaluate_subgroup(parent_nonce, &B.into(), &b_ec_mac)?
         {
-            return Ok((secret, IdentityMac(PhantomData)));
+            return Ok(secret);
         }
 
         // Evaluate the field_to_ec_mac table for `C`.
@@ -549,7 +680,7 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
         };
 
         // Compute the pairing e(A,B) e(C, H_1) on the input A, B, C
-        let conditional_reveal_input = self.verifier_key.pairing(input);
+        let conditional_reveal_input = self.verifier_key.pairing(&input);
 
         // Compute the pairing e(A,B) e(C, H_1) on the MACs of A, B, C
         let conditional_reveal_macs: Result<Vec<_>, EvalError> = {
@@ -601,7 +732,6 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
         // Evaluate the conditional reveal circuit.
         self.conditional_reveal
             .evaluate(&conditional_reveal_input, &conditional_reveal_macs?)
-            .map(|result| (result, IdentityMac(PhantomData)))
     }
 }
 

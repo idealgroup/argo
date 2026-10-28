@@ -139,10 +139,26 @@ where
         input: &F,
         input_mac: &DigitMac<F>,
     ) -> Result<(Fq, IdentityMac<Fq>), EvalError> {
+        let secret = self.evaluate_bits(parent_nonce, &input.to_bits(), input_mac)?;
+        Ok((secret, IdentityMac(PhantomData)))
+    }
+}
+
+impl<F> Table<F>
+where
+    F: PrimeField + FromBits<F, F> + Random + ToBits + NumBits,
+{
+    /// Evaluates on raw input bits, which may spell a value at or above the
+    /// modulus that no `F` can hold.
+    pub(crate) fn evaluate_bits(
+        &self,
+        parent_nonce: &mut crate::garble::Nonce,
+        input_bits: &[bool],
+        input_mac: &DigitMac<F>,
+    ) -> Result<Fq, EvalError> {
         let mut nonce = parent_nonce.fork();
 
         let p_bits = F::MODULUS.to_bits_le();
-        let input_bits = input.to_bits();
 
         let mut x_mac = Vec::with_capacity(input_bits.len());
         for ((adaptor, input), input_mac) in self
@@ -176,12 +192,8 @@ where
             output_mac = res_mac;
         }
 
-        let secret = {
-            let pad: Fq = AesCtr::hash_to_field(*output_mac, &nonce);
-            self.enc_s - pad
-        };
-
-        Ok((secret, IdentityMac(PhantomData)))
+        let pad: Fq = AesCtr::hash_to_field(*output_mac, &nonce);
+        Ok(self.enc_s - pad)
     }
 }
 

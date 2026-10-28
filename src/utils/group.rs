@@ -2,10 +2,8 @@ use std::sync::LazyLock;
 
 use ark_bn254::{Fq, Fq2, Fr, g2};
 use ark_ec::{AffineRepr, short_weierstrass::Affine};
-use ark_ff::{BigInt, BigInteger, PrimeField};
+use ark_ff::{BigInt, PrimeField};
 use ark_std::rand::rngs::StdRng;
-
-use crate::utils::bits::ToBits;
 
 /// A 17-byte offset in Bn254::Fq, i.e. Fq(2^{8 * 17})
 /// Used in optimised from_le_bytes_mod_order for hash_to_field
@@ -107,24 +105,6 @@ impl FromLeBytesModOrder for Fr {
 
         hi
     }
-}
-
-pub(crate) fn is_valid<F>(value: F) -> bool
-where
-    F: PrimeField + ToBits,
-{
-    let value_bits = value.to_bits();
-    let modulus_bits = F::MODULUS.to_bits_le();
-
-    let N = F::MODULUS_BIT_SIZE as usize;
-    for i in 0..N {
-        if !value_bits[N - i - 1] & modulus_bits[N - i - 1] {
-            return true;
-        } else if value_bits[N - i - 1] & !modulus_bits[N - i - 1] {
-            return false;
-        }
-    }
-    false
 }
 
 pub(crate) fn get_curve_point_not_in_g2(rng: &mut StdRng) -> Affine<g2::Config> {

@@ -1,6 +1,6 @@
 use ark_bn254::{Fq, Fq2, Fr, G2Affine, g1, g2};
 use ark_ec::{CurveConfig, short_weierstrass::SWCurveConfig};
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::{
@@ -9,16 +9,16 @@ use crate::{
         binary::less_than,
         bivariate::{self, Monomial, Poly},
         g2_subgroup_check,
-        groth16_verifier::{GID, Input, InputMac, InputMacKey, KAPPA_B},
+        groth16_verifier::{GID, Input, InputBits, InputMac, InputMacKey, KAPPA_B},
     },
     mac::{
-        IteratedMac,
+        IteratedMac, Random,
+        digit::bytes::DigitMac,
         endo::{EndoMacG2, EndoMacKeyG2},
     },
     utils::{
-        bits::NumBits,
+        bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
-        group::is_valid,
     },
 };
 
@@ -200,16 +200,15 @@ impl<const N: usize> Table<N> {
     }
 
     /// Check raw coordinates before any operation that assumes a curve point.
-    /// Some(secret) denotes invalid input, including when the secret is zero.
+    /// Returns the proof as field elements, or `Err(secret)` if a component is
+    /// at or above its modulus or a point is off its curve. The secret may be
+    /// zero.
     pub(crate) fn evaluate_coordinates(
         &self,
         parent_nonce: &mut crate::garble::Nonce,
-        input: &Input<N>,
+        bits: &InputBits<N>,
         input_mac: &InputMac<N>,
-    ) -> Result<Option<Fq>, EvalError> {
-        // The Groth16 input (A, B, C).
-        let Input { A, B, C, x } = *input;
-
+    ) -> Result<Result<Input<N>, Fq>, EvalError> {
         /// B + x^3 - y^2
         fn curve_check_offset<C: SWCurveConfig>(
             point: bivariate::Input<C::BaseField>,
@@ -217,23 +216,49 @@ impl<const N: usize> Table<N> {
             C::COEFF_B + point.x.square() * point.x - point.y.square()
         }
 
+        /// Range-checks one component on its raw bits, returning it as a field
+        /// element, or `Err(secret)` if it is not canonical.
+        fn range_check<F>(
+            table: &less_than::Table<F>,
+            parent_nonce: &mut crate::garble::Nonce,
+            bits: &[bool],
+            input_mac: &DigitMac<F>,
+        ) -> Result<Result<F, Fq>, EvalError>
+        where
+            F: PrimeField + FromBits<F, F> + Random + ToBits + NumBits,
+        {
+            let secret = table.evaluate_bits(parent_nonce, bits, input_mac)?;
+            Ok(F::from_bigint(F::BigInt::from_bits_le(bits)).ok_or(secret))
+        }
+
+        macro_rules! or_reveal {
+            ($checked:expr) => {
+                match $checked {
+                    Ok(value) => value,
+                    Err(secret) => return Ok(Err(secret)),
+                }
+            };
+        }
+
         // Checks that A.x, A.y are valid Fq elements, returning the `secret`
         // otherwise.
-        {
-            let inputs = [input.A.x, input.A.y];
-            let input_macs = [&input_mac.A.x, &input_mac.A.y];
-
-            for ((input, input_mac), table) in inputs
-                .iter()
-                .zip(input_macs.iter())
-                .zip(self.a_range_check.iter())
-            {
-                let secret = table.evaluate(parent_nonce, input, input_mac)?.0;
-                if !is_valid(*input) {
-                    return Ok(Some(secret));
-                }
+        let A = {
+            let [x_table, y_table] = &self.a_range_check;
+            bivariate::Input {
+                x: or_reveal!(range_check(
+                    x_table,
+                    parent_nonce,
+                    bits.component(0),
+                    &input_mac.A.x
+                )?),
+                y: or_reveal!(range_check(
+                    y_table,
+                    parent_nonce,
+                    bits.component(1),
+                    &input_mac.A.y
+                )?),
             }
-        }
+        };
 
         // Evaluate the curve validity check table for `A`. This evaluates to
         // `secret` if `A` is not a valid curve point.
@@ -243,31 +268,39 @@ impl<const N: usize> Table<N> {
             .0;
         // If `A` is not a valid curve point, return `secret` early
         if let Some(inv_curve_check_offset) = curve_check_offset::<g1::Config>(A).inverse() {
-            return Ok(Some(a_curve_check * inv_curve_check_offset));
+            return Ok(Err(a_curve_check * inv_curve_check_offset));
         }
 
-        // Checks that B.x, B.y are valid Fq elements, returning the `secret`
+        // Checks that B.x, B.y are valid Fq2 elements, returning the `secret`
         // otherwise.
-        {
-            let x0_mac = input_mac.B.x[..Fq::NUM_BITS].to_vec().into();
-            let x1_mac = input_mac.B.x[Fq::NUM_BITS..].to_vec().into();
-            let y0_mac = input_mac.B.y[..Fq::NUM_BITS].to_vec().into();
-            let y1_mac = input_mac.B.y[Fq::NUM_BITS..].to_vec().into();
+        let B = {
+            let input_macs: [DigitMac<Fq>; 4] = [
+                input_mac.B.x[..Fq::NUM_BITS].to_vec().into(),
+                input_mac.B.x[Fq::NUM_BITS..].to_vec().into(),
+                input_mac.B.y[..Fq::NUM_BITS].to_vec().into(),
+                input_mac.B.y[Fq::NUM_BITS..].to_vec().into(),
+            ];
 
-            let inputs = [input.B.x.c0, input.B.x.c1, input.B.y.c0, input.B.y.c1];
-            let input_macs = [x0_mac, x1_mac, y0_mac, y1_mac];
-
-            for ((input, input_mac), table) in inputs
-                .iter()
+            let mut values = [Fq::ZERO; 4];
+            for (i, ((value, input_mac), table)) in values
+                .iter_mut()
                 .zip(input_macs.iter())
                 .zip(self.b_range_check.iter())
+                .enumerate()
             {
-                let secret = table.evaluate(parent_nonce, input, input_mac)?.0;
-                if !is_valid(*input) {
-                    return Ok(Some(secret));
-                }
+                *value = or_reveal!(range_check(
+                    table,
+                    parent_nonce,
+                    bits.component(2 + i),
+                    input_mac
+                )?);
             }
-        }
+            let [x0, x1, y0, y1] = values;
+            bivariate::Input {
+                x: Fq2::new(x0, x1),
+                y: Fq2::new(y0, y1),
+            }
+        };
 
         // Evaluate the curve validity check table for `B`. This evaluates to
         // `secret` if `B` is not a valid curve point.
@@ -279,26 +312,28 @@ impl<const N: usize> Table<N> {
         if let Some(inv_curve_check_offset) = curve_check_offset::<g2::Config>(B).inverse() {
             let secret = b_curve_check * inv_curve_check_offset;
             // The committed secret was embedded in Fq2's base-field component.
-            return Ok(Some(secret.c0));
+            return Ok(Err(secret.c0));
         }
 
         // Checks that C.x, C.y are valid Fq elements, returning the `secret`
         // otherwise.
-        {
-            let inputs = [input.C.x, input.C.y];
-            let input_macs = [&input_mac.C.x, &input_mac.C.y];
-
-            for ((input, input_mac), table) in inputs
-                .iter()
-                .zip(input_macs.iter())
-                .zip(self.c_range_check.iter())
-            {
-                let secret = table.evaluate(parent_nonce, input, input_mac)?.0;
-                if !is_valid(*input) {
-                    return Ok(Some(secret));
-                }
+        let C = {
+            let [x_table, y_table] = &self.c_range_check;
+            bivariate::Input {
+                x: or_reveal!(range_check(
+                    x_table,
+                    parent_nonce,
+                    bits.component(6),
+                    &input_mac.C.x
+                )?),
+                y: or_reveal!(range_check(
+                    y_table,
+                    parent_nonce,
+                    bits.component(7),
+                    &input_mac.C.y
+                )?),
             }
-        }
+        };
 
         // Evaluate the curve validity check table for `C`. This evaluates to
         // `secret` if `C` is not a valid curve point.
@@ -308,19 +343,26 @@ impl<const N: usize> Table<N> {
             .0;
         // If `C` is not a valid curve point, return `secret` early
         if let Some(inv_curve_check_offset) = curve_check_offset::<g1::Config>(C).inverse() {
-            return Ok(Some(c_curve_check * inv_curve_check_offset));
+            return Ok(Err(c_curve_check * inv_curve_check_offset));
         }
 
         // Evaluate the range check for each `x_l`.
-        for ((table, x), input_mac) in self.x_range_check.iter().zip(&x).zip(&input_mac.x) {
-            let x_range_check = table.evaluate(parent_nonce, x, input_mac)?.0;
-            // If `x_l` is not a valid Fr element, return `secret` early
-            if !is_valid(*x) {
-                return Ok(Some(x_range_check));
-            }
+        let mut x = [Fr::ZERO; N];
+        for (l, ((x, table), input_mac)) in x
+            .iter_mut()
+            .zip(self.x_range_check.iter())
+            .zip(&input_mac.x)
+            .enumerate()
+        {
+            *x = or_reveal!(range_check(
+                table,
+                parent_nonce,
+                bits.component(8 + l),
+                input_mac
+            )?);
         }
 
-        Ok(None)
+        Ok(Ok(Input { A, B, C, x }))
     }
 
     /// Run only after coordinate checks and conversion of B have succeeded.
@@ -501,11 +543,11 @@ fn test_malformed_curve_points() {
         let b_ec_mac = b_ec_mac_key.encode(&input.B.into());
         let mut nonce = Nonce::new();
         let result = table
-            .evaluate_coordinates(&mut nonce, &input, &input_mac)
+            .evaluate_coordinates(&mut nonce, &InputBits::from(&input), &input_mac)
             .unwrap();
         match result {
-            Some(secret) => secret,
-            None => table
+            Err(secret) => secret,
+            Ok(_) => table
                 .evaluate_subgroup(&mut nonce, &input.B.into(), &b_ec_mac)
                 .unwrap()
                 .unwrap(),

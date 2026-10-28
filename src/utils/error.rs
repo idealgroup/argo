@@ -28,6 +28,14 @@ pub enum VerifierKeyError {
     DegenerateKey,
 }
 
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputError {
+    #[error("Expected {expected} input bits, got {actual}.")]
+    BitCount { expected: usize, actual: usize },
+    #[error("Expected {expected} input labels, got {actual}.")]
+    LabelCount { expected: usize, actual: usize },
+}
+
 #[derive(Error, Debug)]
 pub enum EvalError {
     #[error("There was more than one collision in decoding.")]
