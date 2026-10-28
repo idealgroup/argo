@@ -20,20 +20,18 @@ mod golden_tests;
 use core::panic;
 use std::{any::type_name, marker::PhantomData};
 
-use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, G1Affine, G1Projective, G2Affine, g1, g2};
+use ark_bn254::{Fq, Fq2, Fq12, Fr, G1Affine, G1Projective, G2Affine, g1, g2};
 use ark_ec::{
     AffineRepr, CurveGroup,
-    pairing::Pairing,
     short_weierstrass::{Affine, Projective},
 };
-use ark_ff::{AdditiveGroup, Field, PrimeField};
+use ark_ff::{AdditiveGroup, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
     UniformRand,
     rand::{SeedableRng, rngs::StdRng},
 };
 use num_bigint::BigInt;
-use parking_lot::RwLock;
 
 use crate::{
     garble::{
@@ -53,6 +51,7 @@ use crate::{
         endo::{EndoMacFq12, EndoMacG2, EndoMacKeyG1, EndoScalar},
     },
     utils::{
+        aes_hash::aes_ctr::AesCacheScope,
         bits::ToBits,
         constants::R_MUL_COFACTOR_GENERATOR,
         error::{EvalError, GarbleError, InputError},
@@ -68,14 +67,8 @@ use crate::utils::aes_hash::{
 };
 #[cfg(feature = "groth16")]
 use crate::utils::error::VerifierKeyError;
-
-static PREPROCESSED_VK: RwLock<Option<GarblePreprocessedVk>> = RwLock::new(None);
-
-#[cfg(test)]
-pub(crate) fn reset_preprocessed_vk() {
-    let mut w = PREPROCESSED_VK.write();
-    *w = None;
-}
+#[cfg(any(test, feature = "groth16"))]
+use {ark_bn254::Bn254, ark_ec::pairing::Pairing, ark_ff::Field};
 
 // KAPPA_B is 1 + log_7(2^128)
 pub const KAPPA_B: usize = 46 + 1;
@@ -101,14 +94,6 @@ pub enum PublicInput {
     Constant(Fr),
     /// Part of the proof, with its own labels.
     Garbled,
-}
-
-#[derive(Copy, Clone)]
-pub struct GarblePreprocessedVk {
-    /// e(G, H1)^{2^i}
-    pub h1_target_pow_2: [Fq12; Fr::MODULUS_BIT_SIZE as usize],
-    /// e(G, H2)^{2^i}
-    pub h2_target_pow_2: [Fq12; Fr::MODULUS_BIT_SIZE as usize],
 }
 
 impl<const N: usize> VerifierKey<N> {
@@ -172,44 +157,6 @@ impl<const N: usize> VerifierKey<N> {
             [input.B.into(), self.H1, self.H2],
         )?;
         Ok(pairing * self.c)
-    }
-
-    pub(crate) fn garble_preprocess(&self) -> GarblePreprocessedVk {
-        if let Some(vk) = PREPROCESSED_VK.read().as_ref() {
-            return *vk;
-        }
-
-        let preprocessed_vk = {
-            let compute_pow_2 = |value: Fq12| {
-                let mut powers = [Fq12::ZERO; Fr::MODULUS_BIT_SIZE as usize];
-                powers[0] = value;
-                for i in 1..Fr::MODULUS_BIT_SIZE as usize {
-                    powers[i] = powers[i - 1].square();
-                }
-                powers
-            };
-
-            // h1_target := e(G, H1)
-            let h1_target = Bn254::pairing(G1Affine::generator(), self.H1).0;
-
-            // h2_target := e(G, H2)
-            let h2_target = Bn254::pairing(G1Affine::generator(), self.H2).0;
-
-            // [h1_target^{2^i}]
-            let h1_target_pow_2 = compute_pow_2(h1_target);
-
-            // [h2_target^{2^i}]
-            let h2_target_pow_2 = compute_pow_2(h2_target);
-
-            GarblePreprocessedVk {
-                h1_target_pow_2,
-                h2_target_pow_2,
-            }
-        };
-
-        PREPROCESSED_VK.write().get_or_insert(preprocessed_vk);
-
-        preprocessed_vk
     }
 }
 
@@ -467,6 +414,8 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey<N>,
     ) -> Result<(Self, <IdentityMac<Output> as Mac<Output>>::Key), GarbleError> {
+        let _aes_cache = AesCacheScope::new();
+
         // The secret that will be conditionally revealed, and the Groth16 verifier key
         let (secret, gid, verifier_key) = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
@@ -644,6 +593,7 @@ impl<const N: usize> Table<N> {
         if !self.has_garbled_shape() {
             return Err(EvalError::MalformedTable);
         }
+        let _aes_cache = AesCacheScope::new();
 
         let input = match self
             .input_validity

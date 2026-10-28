@@ -1,6 +1,10 @@
 #[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    marker::PhantomData,
+    rc::Rc,
+};
 
 use aes::{
     Aes128, Block,
@@ -22,6 +26,30 @@ use crate::{
 thread_local! {
     static AES_INSTANCES: RefCell<FxHashMap<[u8; 16], Rc<Aes128>>> =
         RefCell::new(FxHashMap::default());
+    static AES_SCOPES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Caches AES key schedules on this thread until the outermost scope ends.
+/// The keys are labels of one garbling, so a later garbling can't reuse them.
+pub(crate) struct AesCacheScope(PhantomData<Rc<()>>);
+
+impl AesCacheScope {
+    pub(crate) fn new() -> Self {
+        AES_SCOPES.with(|scopes| scopes.set(scopes.get() + 1));
+        Self(PhantomData)
+    }
+}
+
+impl Drop for AesCacheScope {
+    fn drop(&mut self) {
+        let scopes = AES_SCOPES.with(|scopes| {
+            scopes.set(scopes.get() - 1);
+            scopes.get()
+        });
+        if scopes == 0 {
+            AES_INSTANCES.with(|instances| instances.take());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -29,14 +57,12 @@ pub(crate) struct AesCtr;
 
 impl AesCtr {
     pub(crate) fn get_instance(key: &[u8; 16]) -> Rc<Aes128> {
-        AES_INSTANCES.with(|instances| {
-            Rc::clone(
-                instances
-                    .borrow_mut()
-                    .entry(*key)
-                    .or_insert_with(|| Rc::new(Aes128::new(&(*key).into()))),
-            )
-        })
+        let new = || Rc::new(Aes128::new(&(*key).into()));
+        if AES_SCOPES.with(Cell::get) == 0 {
+            return new();
+        }
+        AES_INSTANCES
+            .with(|instances| Rc::clone(instances.borrow_mut().entry(*key).or_insert_with(new)))
     }
 }
 
@@ -130,4 +156,30 @@ pub(crate) fn clear_set() {
     COUNTERS_MAP.with(|map| {
         map.borrow_mut().clear();
     });
+}
+
+#[cfg(test)]
+pub(crate) fn cached_instances() -> usize {
+    AES_INSTANCES.with(|instances| instances.borrow().len())
+}
+
+#[test]
+fn test_aes_cache_scope() {
+    let hash = |byte| {
+        AesCtr::hash(&[byte; 16], &[0; 16]);
+    };
+
+    hash(0);
+    assert_eq!(cached_instances(), 0);
+
+    let outer = AesCacheScope::new();
+    hash(1);
+    {
+        let _inner = AesCacheScope::new();
+        hash(2);
+    }
+    assert_eq!(cached_instances(), 2);
+    drop(outer);
+    assert_eq!(cached_instances(), 0);
+    clear_set();
 }

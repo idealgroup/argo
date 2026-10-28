@@ -866,3 +866,44 @@ fn inconsistent_converters_do_not_panic() {
         "{output:?}"
     );
 }
+
+/// Garbling keeps no key state between calls, so circuits with different
+/// delta and gamma can be garbled one after another in one process.
+#[test]
+fn two_circuits_in_one_process() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let mut garble_circuit = |seed| {
+        let (pk, vk) = mul_add_setup(&mut rng);
+        let (proof, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
+        let verifier_key =
+            VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
+        let (secret, key, table) = garble_with(&mut rng, seed, verifier_key);
+        (secret, key, table, proof_input(&proof, []))
+    };
+    let (secret1, key1, table1, proof1) = garble_circuit(SEED);
+    let (secret2, key2, table2, proof2) = garble_circuit(SEED + 1);
+
+    assert_eq!(evaluate_table(&table1, &key1, &proof1).unwrap(), Fq::ZERO);
+    assert_eq!(evaluate_table(&table2, &key2, &proof2).unwrap(), Fq::ZERO);
+    assert_eq!(evaluate_table(&table1, &key1, &proof2).unwrap(), secret1);
+    assert_eq!(evaluate_table(&table2, &key2, &proof1).unwrap(), secret2);
+}
+
+/// The AES key schedules cached during a call are labels of that garbling
+/// only, so none may outlive the call.
+#[test]
+fn aes_key_cache_is_cleared_after_each_call() {
+    use crate::utils::aes_hash::aes_ctr::cached_instances;
+
+    let f = fixture();
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) = mul_add_setup(&mut rng);
+    let (_, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
+    let verifier_key =
+        VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
+    garble_with(&mut rng, SEED + 2, verifier_key);
+    assert_eq!(cached_instances(), 0);
+
+    evaluate(&f.proof).unwrap();
+    assert_eq!(cached_instances(), 0);
+}

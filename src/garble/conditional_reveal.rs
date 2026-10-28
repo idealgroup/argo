@@ -3,18 +3,16 @@
 //!
 //! When evaluated on an input != one and its MAC, it returns the `secret`.
 
-use ark_bn254::{Fq, Fq12, Fr, g2::Config as G2Config};
-use ark_ec::scalar_mul::glv::GLVConfig;
+use ark_bn254::{Bn254, Fq, Fq12, Fr, G1Affine, G2Affine, g2::Config as G2Config};
+use ark_ec::{AffineRepr, pairing::Pairing, scalar_mul::glv::GLVConfig};
 use ark_ff::{
     AdditiveGroup, BigInteger, Field, Fp12, PrimeField, batch_inversion,
     field_hashers::{DefaultFieldHasher, HashToField},
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-#[cfg(test)]
-use crate::garble::groth16_verifier::reset_preprocessed_vk;
 use crate::{
-    garble::groth16_verifier::{self, GarblePreprocessedVk},
+    garble::groth16_verifier,
     mac::{
         MacKey,
         endo::{ENDO_SIZE, Endo, EndoMacKeyFq12, EndoMacKeyG1, EndoScalar, IteratedEndoMacFq12},
@@ -31,6 +29,17 @@ pub(crate) type InputMac<const KAPPA: usize> = IteratedEndoMacFq12<KAPPA>;
 type InputMacKey<const KAPPA: usize> = [EndoMacKeyFq12; KAPPA];
 
 pub(crate) type Output = Fq;
+
+/// e(G, h)^(2^i) for each bit of Fr, so that e(kG, h) is one `pow_with_table`.
+fn target_powers_of_two(h: G2Affine) -> Vec<Fq12> {
+    let mut power = Bn254::pairing(G1Affine::generator(), h).0;
+    let mut powers = Vec::with_capacity(Fr::MODULUS_BIT_SIZE as usize);
+    for _ in 0..Fr::MODULUS_BIT_SIZE {
+        powers.push(power);
+        power.square_in_place();
+    }
+    powers
+}
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct Table<const KAPPA: usize> {
@@ -51,14 +60,13 @@ impl<const KAPPA: usize> Table<KAPPA> {
         c_ec_mac_key: &[EndoMacKeyG1; KAPPA],
         x_G_output_mac_keys: &[[EndoMacKeyG1; KAPPA]; N],
     ) -> Result<InputMacKey<KAPPA>, GarbleError> {
-        let GarblePreprocessedVk {
-            h1_target_pow_2,
-            h2_target_pow_2,
-            ..
-        } = verifier_key.garble_preprocess();
-
-        #[cfg(test)]
-        reset_preprocessed_vk();
+        let h1_target_pow_2 = target_powers_of_two(verifier_key.H1);
+        // With no garbled inputs there is no e(xG.k, H2) term.
+        let h2_target_pow_2 = if N == 0 {
+            Vec::new()
+        } else {
+            target_powers_of_two(verifier_key.H2)
+        };
 
         let mut key = Vec::with_capacity(pairing_output_mac_key.len());
 
@@ -290,10 +298,7 @@ fn test_conditional_reveal_invalid() {
 }
 
 #[test]
-fn test_preprocessed_pow_two() {
-    use crate::garble::groth16_verifier::{VerifierKey, reset_preprocessed_vk};
-    use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
-    use ark_ec::{AffineRepr, pairing::Pairing};
+fn test_target_powers_of_two() {
     use ark_ff::UniformRand;
     use ark_std::rand::{SeedableRng, rngs::StdRng};
 
@@ -301,27 +306,10 @@ fn test_preprocessed_pow_two() {
 
     let mut rng = StdRng::seed_from_u64(SEED);
 
-    let verifier_key = VerifierKey {
-        G1: [G1Affine::rand(&mut rng)],
-        H1: G2Affine::rand(&mut rng),
-        H2: G2Affine::rand(&mut rng),
-        c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,
-    };
-
-    let GarblePreprocessedVk {
-        h1_target_pow_2,
-        h2_target_pow_2,
-        ..
-    } = verifier_key.garble_preprocess();
-
+    let h = G2Affine::rand(&mut rng);
     let scalar = Fr::rand(&mut rng);
     let point = G1Affine::generator() * scalar;
 
-    let h1_pairing = Fq12::pow_with_table(&h1_target_pow_2, scalar.into_bigint()).unwrap();
-    assert_eq!(h1_pairing, Bn254::pairing(point, verifier_key.H1).0);
-
-    let h2_pairing = Fq12::pow_with_table(&h2_target_pow_2, scalar.into_bigint()).unwrap();
-    assert_eq!(h2_pairing, Bn254::pairing(point, verifier_key.H2).0);
-
-    reset_preprocessed_vk();
+    let pairing = Fq12::pow_with_table(&target_powers_of_two(h), scalar.into_bigint()).unwrap();
+    assert_eq!(pairing, Bn254::pairing(point, h).0);
 }
