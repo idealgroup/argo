@@ -1,8 +1,7 @@
 use ark_bn254::{Fq, Fq2, Fr, G2Affine, g1, g2};
 use ark_ec::{CurveConfig, short_weierstrass::SWCurveConfig};
-use ark_ff::{AdditiveGroup, Field};
+use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::Zero;
 
 use crate::{
     garble::{
@@ -194,13 +193,14 @@ impl Table {
         Ok(table)
     }
 
-    pub(crate) fn evaluate(
+    /// Check raw coordinates before any operation that assumes a curve point.
+    /// Some(secret) denotes invalid input, including when the secret is zero.
+    pub(crate) fn evaluate_coordinates(
         &self,
         parent_nonce: &mut crate::garble::Nonce,
         input: &Input,
         input_mac: &InputMac,
-        b_ec_mac: &IteratedMac<G2Affine, EndoMacG2, KAPPA_B>,
-    ) -> Result<Fq, EvalError> {
+    ) -> Result<Option<Fq>, EvalError> {
         // The Groth16 input (A, B, C).
         let Input { A, B, C, x } = *input;
 
@@ -224,7 +224,7 @@ impl Table {
             {
                 let secret = table.evaluate(parent_nonce, input, input_mac)?.0;
                 if !is_valid(*input) {
-                    return Ok(secret);
+                    return Ok(Some(secret));
                 }
             }
         }
@@ -236,10 +236,8 @@ impl Table {
             .evaluate(parent_nonce, &A, &input_mac.A)?
             .0;
         // If `A` is not a valid curve point, return `secret` early
-        if !a_curve_check.is_zero() {
-            // This unwrap cannot fail because B + x^3 - y^2 != 0
-            let inv_curve_check_offset = curve_check_offset::<g1::Config>(A).inverse().unwrap();
-            return Ok(a_curve_check * inv_curve_check_offset);
+        if let Some(inv_curve_check_offset) = curve_check_offset::<g1::Config>(A).inverse() {
+            return Ok(Some(a_curve_check * inv_curve_check_offset));
         }
 
         // Checks that B.x, B.y are valid Fq elements, returning the `secret`
@@ -260,7 +258,7 @@ impl Table {
             {
                 let secret = table.evaluate(parent_nonce, input, input_mac)?.0;
                 if !is_valid(*input) {
-                    return Ok(secret);
+                    return Ok(Some(secret));
                 }
             }
         }
@@ -272,23 +270,10 @@ impl Table {
             .evaluate(parent_nonce, &B, &input_mac.B)?
             .0;
         // If `B` is not a valid curve point, return `secret` early
-        if !b_curve_check.is_zero() {
-            // This unwrap cannot fail because B + x^3 - y^2 != 0
-            let inv_curve_check_offset = curve_check_offset::<g2::Config>(B).inverse().unwrap();
+        if let Some(inv_curve_check_offset) = curve_check_offset::<g2::Config>(B).inverse() {
             let secret = b_curve_check * inv_curve_check_offset;
-            // This unwrap cannot fail because `b_curve_check` is a nonzero Fq2
-            let secret = secret.to_base_prime_field_elements().next().unwrap();
-
-            return Ok(secret);
-        }
-
-        let b_g2_check = self
-            .b_g2_check
-            .evaluate(parent_nonce, &B.into(), b_ec_mac)?
-            .0;
-        // If B is not in the G2 subgroup, return `secret early`
-        if !b_g2_check.is_zero() {
-            return Ok(b_g2_check);
+            // The committed secret was embedded in Fq2's base-field component.
+            return Ok(Some(secret.c0));
         }
 
         // Checks that C.x, C.y are valid Fq elements, returning the `secret`
@@ -304,7 +289,7 @@ impl Table {
             {
                 let secret = table.evaluate(parent_nonce, input, input_mac)?.0;
                 if !is_valid(*input) {
-                    return Ok(secret);
+                    return Ok(Some(secret));
                 }
             }
         }
@@ -316,11 +301,8 @@ impl Table {
             .evaluate(parent_nonce, &C, &input_mac.C)?
             .0;
         // If `C` is not a valid curve point, return `secret` early
-        if !c_curve_check.is_zero() {
-            // This unwrap cannot fail because B + x^3 - y^2 != 0
-            let inv_curve_check_offset = curve_check_offset::<g1::Config>(C).inverse().unwrap();
-
-            return Ok(c_curve_check * inv_curve_check_offset);
+        if let Some(inv_curve_check_offset) = curve_check_offset::<g1::Config>(C).inverse() {
+            return Ok(Some(c_curve_check * inv_curve_check_offset));
         }
 
         // Evaluate the range check for `x`.
@@ -330,10 +312,26 @@ impl Table {
             .0;
         // If `x` is not a valid Fr element, return `secret` early
         if !is_valid(x) {
-            return Ok(x_range_check);
+            return Ok(Some(x_range_check));
         }
 
-        Ok(Fq::ZERO)
+        Ok(None)
+    }
+
+    /// Run only after coordinate checks and conversion of B have succeeded.
+    pub(crate) fn evaluate_subgroup(
+        &self,
+        parent_nonce: &mut crate::garble::Nonce,
+        input: &G2Affine,
+        b_ec_mac: &IteratedMac<G2Affine, EndoMacG2, KAPPA_B>,
+    ) -> Result<Option<Fq>, EvalError> {
+        if input.is_in_correct_subgroup_assuming_on_curve() {
+            return Ok(None);
+        }
+        // The subgroup gadget does not consume a nonce, so it can be deferred
+        // until the B MAC is available without changing the raw-check nonces.
+        let secret = self.b_g2_check.evaluate(parent_nonce, input, b_ec_mac)?.0;
+        Ok(Some(secret))
     }
 }
 
@@ -363,7 +361,7 @@ fn test_malformed_curve_points() {
     let secret = Fq::rand(&mut rng);
     let gid = GID::random(&mut rng);
 
-    let fq_modulus = Fq::new_unchecked(Fr::MODULUS);
+    let fq_modulus = Fq::new_unchecked(Fq::MODULUS);
 
     // Evaluate the same circuit on differently malformed inputs, check that
     // we recover the same secret
@@ -385,7 +383,7 @@ fn test_malformed_curve_points() {
     let inputs = {
         let malformed_a: Vec<_> = {
             let invalid_x = G1Affine::new_unchecked(fq_modulus, Fq::rand(&mut rng));
-            let invalid_y = G1Affine::new_unchecked(fq_modulus, Fq::rand(&mut rng));
+            let invalid_y = G1Affine::new_unchecked(Fq::rand(&mut rng), fq_modulus);
             let invalid_curve_point =
                 G1Affine::new_unchecked(Fq::rand(&mut rng), Fq::rand(&mut rng));
 
@@ -463,7 +461,7 @@ fn test_malformed_curve_points() {
 
         let malformed_c: Vec<_> = {
             let invalid_x = G1Affine::new_unchecked(fq_modulus, Fq::rand(&mut rng));
-            let invalid_y = G1Affine::new_unchecked(fq_modulus, Fq::rand(&mut rng));
+            let invalid_y = G1Affine::new_unchecked(Fq::rand(&mut rng), fq_modulus);
             let invalid_curve_point =
                 G1Affine::new_unchecked(Fq::rand(&mut rng), Fq::rand(&mut rng));
 
@@ -496,10 +494,18 @@ fn test_malformed_curve_points() {
 
         let input_mac = input_mac_key.encode(&input);
         let b_ec_mac = b_ec_mac_key.encode(&input.B.into());
-        table
-            .evaluate(&mut Nonce::new(), &input, &input_mac, &b_ec_mac)
-            .unwrap()
+        let mut nonce = Nonce::new();
+        let result = table
+            .evaluate_coordinates(&mut nonce, &input, &input_mac)
+            .unwrap();
+        match result {
+            Some(secret) => secret,
+            None => table
+                .evaluate_subgroup(&mut nonce, &input.B.into(), &b_ec_mac)
+                .unwrap()
+                .unwrap(),
+        }
     });
 
-    secrets.all(|recovered_secret| recovered_secret == secret);
+    assert!(secrets.all(|recovered_secret| recovered_secret == secret));
 }

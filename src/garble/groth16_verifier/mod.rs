@@ -321,6 +321,17 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
         let c_ec_mac_key: [EndoMacKeyG1; KAPPA_B] =
             c_ec_mac_key.try_into().unwrap_or_else(|_| panic!());
 
+        // Raw range and curve checks must use the first nonces so evaluation
+        // can reject malformed inputs before point conversion or scalar mul.
+        let input_validity = {
+            let aux = input_validity::Aux {
+                secret,
+                gid,
+                b_ec_mac_key: Box::new(b_ec_mac_key.clone()),
+            };
+            input_validity::Table::garble(parent_nonce, rng, &aux, input_mac_key)?
+        };
+
         // Garbling table for field_to_ec_mac of `A`
         let a_ec_mac = field_mac_to_ec_mac::Table::garble(
             parent_nonce,
@@ -376,15 +387,6 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
             )?
         };
 
-        let input_validity = {
-            let aux = input_validity::Aux {
-                secret,
-                gid,
-                b_ec_mac_key: Box::new(b_ec_mac_key),
-            };
-            input_validity::Table::garble(parent_nonce, rng, &aux, input_mac_key)?
-        };
-
         // Garbling table for the conditional revelation of `secret`.
         let conditional_reveal = {
             let input_mac_key = conditional_reveal::Table::groth16_input_mac_key(
@@ -423,19 +425,30 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
         let Input { A, B, C, x } = *input;
         let VerifierKey { H1, H2, .. } = self.verifier_key;
 
+        if let Some(secret) =
+            self.input_validity
+                .evaluate_coordinates(parent_nonce, input, input_mac)?
+        {
+            return Ok((secret, IdentityMac(PhantomData)));
+        }
+
         // Evaluate the field_to_ec_mac table for `A`.
         let a_ec_mac = self.a_ec_mac.evaluate(parent_nonce, &A, &input_mac.A)?.1;
 
         // Evaluate the field_to_ec_mac table for `B`.
         let b_ec_mac = self.b_ec_mac.evaluate(parent_nonce, &B, &input_mac.B)?.1;
 
+        if let Some(secret) =
+            self.input_validity
+                .evaluate_subgroup(parent_nonce, &B.into(), &b_ec_mac)?
+        {
+            return Ok((secret, IdentityMac(PhantomData)));
+        }
+
         // Evaluate the field_to_ec_mac table for `C`.
         let c_ec_mac = self.c_ec_mac.evaluate(parent_nonce, &C, &input_mac.C)?.1;
 
         let x_G_mac = self.x_G.evaluate(parent_nonce, &x, &input_mac.x)?.1;
-
-        self.input_validity
-            .evaluate(parent_nonce, input, input_mac, &b_ec_mac)?;
 
         // Compute the pairing e(A,B) e(C, H_1) on the input A, B, C
         let conditional_reveal_input = self.verifier_key.pairing(input);
@@ -637,4 +650,47 @@ fn test_groth16_serde_roundtrip() {
     aes_mitccr_clear_set();
 
     assert_eq!(original_output, deserialised_output);
+}
+
+#[test]
+/// Malformed inputs must reveal the secret, and must be rejected before point
+/// conversion or scalar multiplication.
+fn test_malformed_groth16() {
+    use crate::utils::group::get_curve_point_not_in_g2;
+
+    let mut rng = StdRng::seed_from_u64(0);
+    let secret = Fq::rand(&mut rng);
+
+    let mut valid = Input::random(&mut rng);
+    valid.x = Fr::ZERO;
+    let mut verifier_key = VerifierKey {
+        G1: G1Affine::rand(&mut rng),
+        H1: G2Affine::rand(&mut rng),
+        H2: G2Affine::rand(&mut rng),
+        c: Fq12::ONE,
+    };
+    verifier_key.c = verifier_key.pairing(&valid).inverse().unwrap();
+
+    let input_mac_key = InputMacKey::random_key(&mut rng);
+    let gid = GID::random(&mut rng);
+    let table = garble_groth16(0, secret, verifier_key, &input_mac_key, gid).unwrap();
+
+    let mut inputs = [valid; 4];
+    // x = r passes the pairing check, so only the range check reveals `secret`.
+    inputs[0].x = Fr::new_unchecked(Fr::MODULUS);
+    assert_eq!(verifier_key.pairing(&inputs[0]), Fq12::ONE);
+    inputs[1].B.y.c1 = Fq::new_unchecked(Fq::MODULUS);
+    inputs[2].C = bivariate::Input {
+        x: Fq::ZERO,
+        y: Fq::ZERO,
+    };
+    inputs[3].B = get_curve_point_not_in_g2(&mut rng).into();
+
+    for input in inputs {
+        let input_mac = input_mac_key.encode(&input);
+        let output = table.evaluate(&mut Nonce::new(), &input, &input_mac);
+        aes_ctr_clear_set();
+        aes_mitccr_clear_set();
+        assert_eq!(output.unwrap().0, secret);
+    }
 }
