@@ -158,7 +158,7 @@ where
     ) -> Result<(Self, OutputMacKey<Config, KAPPA>), GarbleError> {
         assert_eq!(Config::COEFF_A, F::ZERO);
 
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
         let (is_full, output_mac_key, secret) = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
 
@@ -334,7 +334,7 @@ where
         input: &Input<Config::BaseField>,
         input_mac: &InputMac<Config::BaseField>,
     ) -> Result<(Affine<Config>, OutputMac<Config, KAPPA>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mut xs = Vec::with_capacity(self.x.len());
         let mut ys = if self.is_full {

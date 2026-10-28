@@ -139,7 +139,7 @@ where
             type_name::<Self::Aux>(),
             type_name::<Self>(),
         ))?;
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         // Adaptor tables for the scalar
         let mut adaptors = Vec::with_capacity(input_mac_key.len());
@@ -194,7 +194,7 @@ where
         input: &Input<C>,
         input_mac: &InputMac<C>,
     ) -> Result<(Output<C>, OutputMac<C, KAPPA>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mut adapted_input_mac = Vec::with_capacity(self.adaptors.len());
 

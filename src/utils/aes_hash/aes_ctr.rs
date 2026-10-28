@@ -19,6 +19,7 @@ use crate::{
     garble::Nonce,
     utils::{
         aes_hash::{AES_BLOCK_SIZE, Hash, LEN_PER_BASE_ELEM},
+        error::NonceError,
         group::FromLeBytesModOrder,
     },
 };
@@ -89,7 +90,10 @@ impl AesCtr {
     /// # Panics
     ///
     /// Panics if F::extension_degree() > 2
-    pub(crate) fn hash_to_field<F>(value: [u8; AES_BLOCK_SIZE], parent_nonce: &Nonce) -> F
+    pub(crate) fn hash_to_field<F>(
+        value: [u8; AES_BLOCK_SIZE],
+        parent_nonce: &Nonce,
+    ) -> Result<F, NonceError>
     where
         F: Field,
         F::BasePrimeField: FromLeBytesModOrder,
@@ -113,7 +117,7 @@ impl AesCtr {
 
         for elem in base_prime_field_elems.iter_mut() {
             for i in 0..num_blocks_per_base_elem {
-                let nonce = parent_nonce.fork();
+                let nonce = parent_nonce.fork()?;
                 let mut block = Block::from(nonce.bytes());
                 aes.encrypt_block(&mut block);
 
@@ -126,7 +130,7 @@ impl AesCtr {
 
         // This unwrap cannot fail because `base_prime_field_elems` is length
         // `m = F::extension_degree()`.
-        F::from_base_prime_field_elems(base_prime_field_elems).unwrap()
+        Ok(F::from_base_prime_field_elems(base_prime_field_elems).unwrap())
     }
 
     /// The number of bytes of this field element as a multiple of AES blocks.

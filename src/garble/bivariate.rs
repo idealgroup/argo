@@ -308,7 +308,7 @@ where
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac<F> as Mac<Input<F>>>::Key,
     ) -> Result<(Self, <IdentityMac<F> as Mac<F>>::Key), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let poly = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
@@ -354,7 +354,7 @@ where
         input: &Input<F>,
         input_mac: &InputMac<F>,
     ) -> Result<(F, IdentityMac<F>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mut poly = Poly::default();
         for (xy, monomial, table) in self.tables.iter() {

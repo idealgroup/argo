@@ -78,7 +78,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey,
     ) -> Result<(Self, OutputMacKey), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let gid = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
@@ -112,7 +112,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
         input: &Input,
         input_mac: &InputMac,
     ) -> Result<(bool, OutputMac), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mac_left = if input.right() {
             // If input.right = 1, use input_mac.left as mac_left, i.e.

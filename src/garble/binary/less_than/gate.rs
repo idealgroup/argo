@@ -113,7 +113,7 @@ impl Circuit<Input, InputMac, bool, Bit16ByteMac> for Table {
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac as Mac<Input>>::Key,
     ) -> Result<(Self, <Bit16ByteMac as Mac<bool>>::Key), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         // (x + p)
         let (x_p, xp_output_mac_key) = {
@@ -171,7 +171,7 @@ impl Circuit<Input, InputMac, bool, Bit16ByteMac> for Table {
         input: &Input,
         input_mac: &InputMac,
     ) -> Result<(bool, Bit16ByteMac), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let (x_p, xp_mac) = {
             let input = BinaryInput::new(input.x, input.p);

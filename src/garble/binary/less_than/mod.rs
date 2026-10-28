@@ -71,7 +71,7 @@ where
         aux: Option<Self::Aux>,
         input_mac_key: &DigitMacKey<F>,
     ) -> Result<(Self, IdentityMacKey), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
         let (secret, gid) = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
 
@@ -114,7 +114,7 @@ where
 
         let enc_s = {
             let mac_false = output_mac_key.encode(&false);
-            let pad: Fq = AesCtr::hash_to_field(*mac_false, &nonce);
+            let pad: Fq = AesCtr::hash_to_field(*mac_false, &nonce)?;
 
             secret + pad
         };
@@ -164,7 +164,7 @@ where
         input_bits: &[bool],
         input_mac: &DigitMac<F>,
     ) -> Result<Fq, EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let p_bits = F::MODULUS.to_bits_le();
 
@@ -200,7 +200,7 @@ where
             output_mac = res_mac;
         }
 
-        let pad: Fq = AesCtr::hash_to_field(*output_mac, &nonce);
+        let pad: Fq = AesCtr::hash_to_field(*output_mac, &nonce)?;
         Ok(self.enc_s - pad)
     }
 }

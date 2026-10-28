@@ -42,7 +42,7 @@ where
         phi: &G,
     ) -> Result<GroupMacKey<G>, GarbleError> {
         let mac = self.encode(&false);
-        let k = AesCtr::hash_to_field(*mac, parent_nonce);
+        let k = AesCtr::hash_to_field(*mac, parent_nonce)?;
 
         Ok(GroupMacKey { phi: *phi, k })
     }
@@ -74,7 +74,7 @@ where
         aux: Option<Self::Aux>,
         input_mac_key: &Bit16ByteMacKey,
     ) -> Result<(Self, GroupMacKey<G>), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
         // The chosen `phi` for the output_mac_key.
         let phi = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
@@ -116,14 +116,14 @@ where
         input: &bool,
         input_mac: &Bit16ByteMac,
     ) -> Result<(bool, BitGroupMac<G>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let output_mac = if !(*input) {
             // If the input is `false`, the `output_mac` will be
             //                  phi * 0 + k = k;
             // but since output_mac_key.k = hash(input_mac_key.encode(false)),
             // we can directly derive `k` by hashing the `input_mac`.
-            AesCtr::hash_to_field::<G>(**input_mac, &nonce).into()
+            AesCtr::hash_to_field::<G>(**input_mac, &nonce)?.into()
         } else {
             // If the input is `true`, we have to decrypt the table entry
             // using the `input_mac` as a key, to recover the plaintext
@@ -162,7 +162,7 @@ where
 
         // Generate keystream
         for i in 0..num_blocks {
-            let nonce = parent_nonce.fork();
+            let nonce = parent_nonce.fork()?;
             let mut block = Block::from(nonce.bytes());
             aes.encrypt_block(&mut block);
 
@@ -204,14 +204,14 @@ where
         let aes = AesCtr::get_instance(self);
 
         // Recover the one-time pad used to encrypt the ciphertext.
-        (0..num_blocks).for_each(|_| {
-            let nonce = parent_nonce.fork();
+        for _ in 0..num_blocks {
+            let nonce = parent_nonce.fork()?;
 
             let mut block = Block::from(nonce.bytes());
             aes.encrypt_block(&mut block);
 
             plaintext.extend_from_slice(&block);
-        });
+        }
 
         // XOR the ciphertext with the one-time pad to recover the plaintext
         // byte representation of the group element.

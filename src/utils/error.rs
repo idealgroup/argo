@@ -16,6 +16,16 @@ pub enum GarbleError {
     MissingKScalar(&'static str),
     #[error("The verifier key's pairing constant is zero.")]
     DegenerateVerifierKey,
+    #[error(transparent)]
+    Nonce(#[from] NonceError),
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceError {
+    #[error("A table has more than u16::MAX sub-tables.")]
+    TooManyChildren,
+    #[error("The tables nest more than 8 levels deep.")]
+    TooDeep,
 }
 
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,4 +70,6 @@ pub enum EvalError {
     InvalidMacPoint,
     #[error("A pairing's Miller loop output is zero.")]
     DegeneratePairing,
+    #[error(transparent)]
+    Nonce(#[from] NonceError),
 }

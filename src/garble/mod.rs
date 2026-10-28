@@ -2,7 +2,7 @@ use rand_core::CryptoRngCore;
 
 use crate::{
     mac::Mac,
-    utils::error::{EvalError, GarbleError},
+    utils::error::{EvalError, GarbleError, NonceError},
 };
 
 pub(crate) mod bilinear;
@@ -74,22 +74,27 @@ impl Nonce {
     }
 
     /// Forks the parent nonce to return a child nonce
-    pub fn fork(&mut self) -> Self {
+    pub fn fork(&mut self) -> Result<Self, NonceError> {
         // Increment the counter at the current level to register that one more
         // child has been created
-        self.update();
+        self.update()?;
 
         // Return the child nonce by copying its parents counter, and
         // incrementing the level index
-        Self {
+        Ok(Self {
             counters: self.counters,
             level: self.level + 1,
-        }
+        })
     }
 
     #[inline]
-    fn update(&mut self) {
-        self.counters[self.level] += 1;
+    fn update(&mut self) -> Result<(), NonceError> {
+        let counter = self
+            .counters
+            .get_mut(self.level)
+            .ok_or(NonceError::TooDeep)?;
+        *counter = counter.checked_add(1).ok_or(NonceError::TooManyChildren)?;
+        Ok(())
     }
 }
 
@@ -97,11 +102,26 @@ impl Nonce {
 fn test_nonce_bytes_are_little_endian() {
     let mut nonce = Nonce::new();
     for _ in 0..0x0102 {
-        nonce.fork();
+        nonce.fork().unwrap();
     }
-    let mut child = nonce.fork();
-    child.fork();
+    let mut child = nonce.fork().unwrap();
+    child.fork().unwrap();
     let mut expected = [0; 16];
     expected[..4].copy_from_slice(&[0x03, 0x01, 0x01, 0x00]);
     assert_eq!(child.bytes(), expected);
+}
+
+#[test]
+fn nonce_overflow_is_an_error() {
+    let mut nonce = Nonce::new();
+    for _ in 0..u16::MAX {
+        nonce.fork().unwrap();
+    }
+    assert_eq!(nonce.fork(), Err(NonceError::TooManyChildren));
+
+    let mut nonce = Nonce::new();
+    for _ in 0..8 {
+        nonce = nonce.fork().unwrap();
+    }
+    assert_eq!(nonce.fork(), Err(NonceError::TooDeep));
 }

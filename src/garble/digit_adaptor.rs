@@ -63,7 +63,7 @@ where
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey<F>,
     ) -> Result<(Self, OutputMacKey<F>), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mut bit_adaptor_tables = Vec::with_capacity(F::NUM_BITS);
         let mut output_mac_keys = Vec::with_capacity(F::NUM_BITS);
@@ -84,7 +84,7 @@ where
         input: &F,
         input_mac: &InputMac<F>,
     ) -> Result<(F, OutputMac<F>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let input_bits = input.to_bits();
         let mut bit_group_macs = Vec::with_capacity(F::NUM_BITS);
