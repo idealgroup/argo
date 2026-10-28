@@ -1,7 +1,7 @@
 use crate::mac::{Mac, MacKey, RandomFromPhi};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{RngCore as _, rngs::StdRng};
 use derive_more::{Deref, From};
+use rand_core::CryptoRngCore;
 
 /// MAC from a bit to a 16-byte word
 #[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq, From, Deref)]
@@ -44,7 +44,7 @@ impl MacKey<bool, Bit16ByteMac> for Bit16ByteMacKey {
         }
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let mut phi = [0; 16];
         rng.fill_bytes(&mut phi);
 
@@ -59,7 +59,7 @@ impl Mac<bool> for Bit16ByteMac {
     type Key = Bit16ByteMacKey;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> bool {
+    fn random_input(rng: &mut impl CryptoRngCore) -> bool {
         use ark_std::rand::Rng;
         rng.gen_bool(0.5)
     }
@@ -68,7 +68,7 @@ impl Mac<bool> for Bit16ByteMac {
 impl RandomFromPhi<bool, Bit16ByteMac> for Bit16ByteMacKey {
     type Phi = [u8; 16];
 
-    fn random_from_phi(rng: &mut StdRng, phi: &Self::Phi) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &Self::Phi) -> Self {
         let mut k = [0; 16];
         rng.fill_bytes(&mut k);
 

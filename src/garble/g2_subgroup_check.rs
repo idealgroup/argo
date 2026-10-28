@@ -15,7 +15,7 @@ use ark_ec::AffineRepr;
 use ark_ec::short_weierstrass::Projective;
 use ark_ec::{CurveGroup, short_weierstrass::Affine};
 use ark_ff::{AdditiveGroup, PrimeField};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::garble::groth16_verifier::KAPPA_B;
 use crate::garble::{Circuit, conditional_reveal};
@@ -42,7 +42,7 @@ impl Circuit<Input, InputMac, Output, IdentityMac<Output>> for Table {
 
     fn garble(
         _parent_nonce: &mut super::Nonce,
-        _rng: &mut StdRng,
+        _rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac as crate::mac::Mac<Input>>::Key,
     ) -> Result<(Self, <IdentityMac<Output> as crate::mac::Mac<Output>>::Key), GarbleError> {

@@ -2,7 +2,7 @@ use std::any::type_name;
 
 use aes::{Block, cipher::BlockEncrypt};
 use ark_ff::{BigInteger, Field, PrimeField};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{
@@ -70,7 +70,7 @@ where
 
     fn garble(
         parent_nonce: &mut Nonce,
-        _rng: &mut StdRng,
+        _rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &Bit16ByteMacKey,
     ) -> Result<(Self, GroupMacKey<G>), GarbleError> {
@@ -233,7 +233,7 @@ where
     G: Field + Random,
     G::BasePrimeField: FromLeBytesModOrder,
 {
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     use crate::{
         mac::{Mac, MacKey},

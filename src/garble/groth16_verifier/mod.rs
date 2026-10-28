@@ -18,7 +18,6 @@ mod e2e_tests;
 mod golden_tests;
 
 use core::panic;
-use std::{any::type_name, marker::PhantomData};
 
 use ark_bn254::{Fq, Fq2, Fq12, Fr, G1Affine, G1Projective, G2Affine, g1, g2};
 use ark_ec::{
@@ -27,11 +26,10 @@ use ark_ec::{
 };
 use ark_ff::{AdditiveGroup, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{
-    UniformRand,
-    rand::{SeedableRng, rngs::StdRng},
-};
+use ark_std::UniformRand;
 use num_bigint::BigInt;
+use rand_chacha::ChaCha20Rng;
+use rand_core::{CryptoRngCore, SeedableRng};
 
 use crate::{
     garble::{
@@ -44,7 +42,7 @@ use crate::{
         keys::{a_ec_mac_key, b_mac_key},
     },
     mac::{
-        IdentityMac, IdentityMacKey, IteratedMac, Mac, MacKey, RandomFromPhi,
+        IteratedMac, Mac, MacKey, Random, RandomFromPhi,
         bit::bytes::{Bit16ByteMac, Bit16ByteMacKey},
         ddh::DDHMac,
         digit,
@@ -59,14 +57,17 @@ use crate::{
     },
 };
 
-#[cfg(test)]
-use crate::mac::Random;
-#[cfg(test)]
-use crate::utils::aes_hash::{
-    aes_ctr::clear_set as aes_ctr_clear_set, aes_mitccr::clear_set as aes_mitccr_clear_set,
-};
 #[cfg(feature = "groth16")]
 use crate::utils::error::VerifierKeyError;
+#[cfg(test)]
+use crate::{
+    garble::bit_adaptor::clear_set as bit_adaptor_clear_set,
+    utils::aes_hash::{
+        aes_ctr::clear_set as aes_ctr_clear_set, aes_mitccr::clear_set as aes_mitccr_clear_set,
+    },
+};
+#[cfg(test)]
+use ark_std::rand::rngs::StdRng;
 #[cfg(any(test, feature = "groth16"))]
 use {ark_bn254::Bn254, ark_ec::pairing::Pairing, ark_ff::Field};
 
@@ -170,7 +171,7 @@ pub struct Input<const N: usize = 1> {
 }
 
 impl<const N: usize> Input<N> {
-    pub fn random(rng: &mut StdRng) -> Self {
+    pub fn random(rng: &mut impl CryptoRngCore) -> Self {
         use ark_ff::UniformRand;
 
         Input {
@@ -249,8 +250,6 @@ pub struct InputMac<const N: usize = 1> {
     C: bivariate::InputMac<Fq>,
     x: [digit::bytes::DigitMac<Fr>; N],
 }
-
-type Output = conditional_reveal::Output;
 
 /// A 16-byte label of one input bit.
 pub type Label = [u8; 16];
@@ -335,7 +334,7 @@ impl<const N: usize> MacKey<Input<N>, InputMac<N>> for InputMacKey<N> {
             x: std::array::from_fn(|l| self.x[l].decode(&mac.x[l])),
         }
     }
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         Self {
             A: bivariate::InputMacKey::random_key(rng),
             B: bivariate::InputMacKey::random_key(rng),
@@ -349,37 +348,68 @@ impl<const N: usize> Mac<Input<N>> for InputMac<N> {
     type Key = InputMacKey<N>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Input<N> {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Input<N> {
         Input::random(rng)
     }
 }
 
-/// Given an RNG seed, a domain separation tag for the fixed-key AES hash, and
-/// the verifier key, returns a garbling table and the input MAC key used
-pub fn garble_groth16<const N: usize>(
-    rng_seed: u64,
-    secret: Fq,
-    verifier_key: VerifierKey<N>,
-    input_mac_key: &InputMacKey<N>,
-    gid: GID,
-) -> Result<Table<N>, GarbleError> {
-    let mut rng = StdRng::seed_from_u64(rng_seed);
-    let mut nonce = Nonce::new();
+/// The value that evaluating a table on an invalid proof reveals.
+pub type Secret = Fq;
 
-    let table = Table::garble(
-        &mut nonce,
-        &mut rng,
-        Some((secret, gid, verifier_key)),
+/// A garbled verifier with the garbler's secrets.
+pub struct Garbling<const N: usize = 1> {
+    pub table: Table<N>,
+    /// Revealed by an invalid proof. Never zero.
+    pub secret: Secret,
+    /// The labels of every input bit, see [`InputMacKey::label_pairs`].
+    pub input_mac_key: InputMacKey<N>,
+}
+
+/// Garbles a verifier for `verifier_key`. ChaCha20 seeded with `seed` derives,
+/// in this order, the secret, the label keys, the gid and the table, so anyone
+/// holding the seed and the key can rebuild the same bytes on any platform.
+pub fn garble<const N: usize>(
+    verifier_key: &VerifierKey<N>,
+    seed: [u8; 32],
+) -> Result<Garbling<N>, GarbleError> {
+    let mut rng = ChaCha20Rng::from_seed(seed);
+    let secret = loop {
+        let secret = Fq::rand(&mut rng);
+        if secret != Fq::ZERO {
+            break secret;
+        }
+    };
+    let input_mac_key = InputMacKey::random_key(&mut rng);
+    let gid = GID::random(&mut rng);
+    let table = Table::garble(&mut rng, secret, gid, verifier_key, &input_mac_key)?;
+
+    #[cfg(test)]
+    {
+        aes_ctr_clear_set();
+        aes_mitccr_clear_set();
+        bit_adaptor_clear_set();
+    }
+
+    Ok(Garbling {
+        table,
+        secret,
         input_mac_key,
-    )?
-    .0;
+    })
+}
 
-    #[cfg(test)]
-    aes_ctr_clear_set();
-    #[cfg(test)]
-    aes_mitccr_clear_set();
-
-    Ok(table)
+/// Evaluates `table` against the evaluator's own `verifier_key` on the proof
+/// bits and their labels. Returns the secret for an invalid proof, and `None`
+/// for a valid proof or a table that fails to evaluate.
+pub fn evaluate<const N: usize>(
+    verifier_key: &VerifierKey<N>,
+    table: &Table<N>,
+    bits: &InputBits<N>,
+    input_mac: &InputMac<N>,
+) -> Option<Secret> {
+    table
+        .evaluate_bits(verifier_key, bits, input_mac)
+        .ok()
+        .flatten()
 }
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
@@ -399,26 +429,20 @@ pub struct Table<const N: usize = 1> {
     pairing: pairing::Table,
     // Leaks secret if evaluated on an input != 1 and its MAC
     pub conditional_reveal: conditional_reveal::Table<KAPPA_B>,
-    // Groth16 verifier key
-    verifier_key: VerifierKey<N>,
     // Global ID of this instance
     gid: GID,
 }
 
-impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>> for Table<N> {
-    type Aux = (Fq, GID, VerifierKey<N>);
-
+impl<const N: usize> Table<N> {
     fn garble(
-        parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
-        aux: Option<Self::Aux>,
+        rng: &mut impl CryptoRngCore,
+        secret: Secret,
+        gid: GID,
+        verifier_key: &VerifierKey<N>,
         input_mac_key: &InputMacKey<N>,
-    ) -> Result<(Self, <IdentityMac<Output> as Mac<Output>>::Key), GarbleError> {
+    ) -> Result<Self, GarbleError> {
         let _aes_cache = AesCacheScope::new();
-
-        // The secret that will be conditionally revealed, and the Groth16 verifier key
-        let (secret, gid, verifier_key) = aux
-            .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
+        let parent_nonce = &mut Nonce::new();
 
         // Sample `KAPPA_B` random `r`s
         let mut rs = Box::new([Fr::ZERO; KAPPA_B]);
@@ -534,7 +558,7 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
         // Garbling table for the conditional revelation of `secret`.
         let conditional_reveal = {
             let input_mac_key = conditional_reveal::Table::groth16_input_mac_key(
-                &verifier_key,
+                verifier_key,
                 &pairing_output_mac_key,
                 &c_ec_mac_key,
                 &x_G_output_mac_keys,
@@ -543,34 +567,18 @@ impl<const N: usize> Circuit<Input<N>, InputMac<N>, Output, IdentityMac<Output>>
             conditional_reveal::Table::garble(enc_s, &input_mac_key)
         };
 
-        Ok((
-            Self {
-                input_validity,
-                x_G,
-                a_ec_mac,
-                b_ec_mac,
-                c_ec_mac,
-                pairing,
-                conditional_reveal,
-                verifier_key,
-                gid,
-            },
-            IdentityMacKey,
-        ))
+        Ok(Self {
+            input_validity,
+            x_G,
+            a_ec_mac,
+            b_ec_mac,
+            c_ec_mac,
+            pairing,
+            conditional_reveal,
+            gid,
+        })
     }
 
-    fn evaluate(
-        &self,
-        parent_nonce: &mut Nonce,
-        input: &Input<N>,
-        input_mac: &InputMac<N>,
-    ) -> Result<(Output, IdentityMac<Output>), EvalError> {
-        self.evaluate_bits(parent_nonce, &InputBits::from(input), input_mac)
-            .map(|secret| (secret, IdentityMac(PhantomData)))
-    }
-}
-
-impl<const N: usize> Table<N> {
     /// Whether every part has the shape `garble` produces: the replica and bit
     /// counts, the Y tables, the polynomial monomials and the gids. Check this
     /// before accepting a table from a garbler; `evaluate_bits` checks it too.
@@ -582,29 +590,31 @@ impl<const N: usize> Table<N> {
             && self.c_ec_mac.has_garbled_shape(false)
     }
 
-    /// Evaluates on the raw proof bits and their labels. Returns the secret
-    /// for an invalid proof and `Fq::ZERO` for a valid one.
+    /// Evaluates against `verifier_key` on the raw proof bits and their
+    /// labels. Returns the secret for an invalid proof and `None` for a valid
+    /// one.
     pub fn evaluate_bits(
         &self,
-        parent_nonce: &mut Nonce,
+        verifier_key: &VerifierKey<N>,
         bits: &InputBits<N>,
         input_mac: &InputMac<N>,
-    ) -> Result<Output, EvalError> {
+    ) -> Result<Option<Secret>, EvalError> {
         if !self.has_garbled_shape() {
             return Err(EvalError::MalformedTable);
         }
         let _aes_cache = AesCacheScope::new();
+        let parent_nonce = &mut Nonce::new();
 
         let input = match self
             .input_validity
             .evaluate_coordinates(parent_nonce, bits, input_mac)?
         {
             Ok(input) => input,
-            Err(secret) => return Ok(secret),
+            Err(secret) => return Ok(Some(secret)),
         };
         // The Groth16 input (A, B, C).
         let Input { A, B, C, x } = input;
-        let VerifierKey { H1, H2, .. } = self.verifier_key;
+        let VerifierKey { H1, H2, .. } = *verifier_key;
 
         // A point that hits a conversion's doubling case releases the secret.
         if let Some(secret) = self
@@ -613,7 +623,7 @@ impl<const N: usize> Table<N> {
             .or_else(|| self.b_ec_mac.reveal(&input_mac.B))
             .or_else(|| self.c_ec_mac.reveal(&input_mac.C))
         {
-            return Ok(secret);
+            return Ok(Some(secret));
         }
 
         // Evaluate the field_to_ec_mac table for `A`.
@@ -626,7 +636,7 @@ impl<const N: usize> Table<N> {
             self.input_validity
                 .evaluate_subgroup(parent_nonce, &B.into(), &b_ec_mac)?
         {
-            return Ok(secret);
+            return Ok(Some(secret));
         }
 
         // Evaluate the field_to_ec_mac table for `C`.
@@ -646,7 +656,7 @@ impl<const N: usize> Table<N> {
         };
 
         // Compute the pairing e(A,B) e(C, H_1) on the input A, B, C
-        let conditional_reveal_input = self.verifier_key.pairing(&input)?;
+        let conditional_reveal_input = verifier_key.pairing(&input)?;
 
         // Compute the pairing e(A,B) e(C, H_1) on the MACs of A, B, C
         let conditional_reveal_macs = {
@@ -705,26 +715,21 @@ impl<const N: usize> Table<N> {
 }
 
 #[cfg(test)]
-fn test_groth16(mut rng: &mut StdRng, input: &Input, vk: &VerifierKey, secret: Fq) -> Fq {
+fn test_groth16(
+    rng: &mut impl CryptoRngCore,
+    input: &Input,
+    vk: &VerifierKey,
+    secret: Fq,
+) -> Option<Secret> {
     let gid = GID::random(rng);
 
-    let input_mac_key = InputMacKey::random_key(&mut rng);
-    let table = Table::garble(
-        &mut Nonce::new(),
-        rng,
-        Some((secret, gid, *vk)),
-        &input_mac_key,
-    )
-    .unwrap()
-    .0;
+    let input_mac_key = InputMacKey::random_key(rng);
+    let table = Table::garble(rng, secret, gid, vk, &input_mac_key).unwrap();
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
 
     let input_mac = input_mac_key.encode(input);
-    let output = table
-        .evaluate(&mut Nonce::new(), input, &input_mac)
-        .unwrap()
-        .0;
+    let output = table.evaluate_bits(vk, &input.into(), &input_mac).unwrap();
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
 
@@ -732,10 +737,9 @@ fn test_groth16(mut rng: &mut StdRng, input: &Input, vk: &VerifierKey, secret: F
 }
 
 #[test]
-/// Evaluating the circuit on a valid SNARK and its MAC should return Fq::ZERO,
-/// i.e. it should not reveal the `secret`.
+/// Evaluating the circuit on a valid SNARK and its MAC should not reveal the
+/// `secret`.
 fn test_valid_groth16() {
-    use ark_ff::AdditiveGroup;
     use ark_ff::Field;
 
     const SEED: u64 = 0;
@@ -771,8 +775,7 @@ fn test_valid_groth16() {
     };
     let output = test_groth16(&mut rng, &input, &verifier_key, secret);
 
-    // Assert that the circuit returns Fq::ZERO when evaluated on a valid input
-    assert_eq!(output, Fq::ZERO);
+    assert_eq!(output, None);
 }
 
 #[test]
@@ -794,14 +797,12 @@ fn test_invalid_groth16() {
 
     let output = test_groth16(&mut rng, &input, &verifier_key, secret);
 
-    assert_eq!(output, secret);
+    assert_eq!(output, Some(secret));
 }
 
 #[test]
 /// Roundtrip serialisation and deserialisation of the table.
 fn test_groth16_serde_roundtrip() {
-    use crate::garble::Circuit;
-    use crate::garble::Nonce;
     use crate::mac::MacKey;
     use ark_bn254::{G1Projective, G2Projective};
     use ark_ec::PrimeGroup;
@@ -813,12 +814,8 @@ fn test_groth16_serde_roundtrip() {
     const SEED: u64 = 0;
 
     let mut rng = StdRng::seed_from_u64(SEED);
-    let secret = Fq::rand(&mut rng);
 
     let input = InputMac::random_input(&mut rng);
-    let input_mac_key = InputMacKey::random_key(&mut rng);
-    let gid = GID::random(&mut rng);
-
     let verifier_key = VerifierKey {
         G1: [G1Affine::rand(&mut rng)],
         H1: G2Affine::rand(&mut rng),
@@ -826,14 +823,18 @@ fn test_groth16_serde_roundtrip() {
         c: Bn254::pairing(G1Projective::rand(&mut rng), G2Projective::generator()).0,
     };
 
-    let original_table = garble_groth16(SEED, secret, verifier_key, &input_mac_key, gid).unwrap();
+    let Garbling {
+        table: original_table,
+        input_mac_key,
+        ..
+    } = garble(&verifier_key, [0; 32]).unwrap();
 
     let input_mac: InputMac = input_mac_key.encode(&input);
+    let bits = InputBits::from(&input);
 
     let original_output = original_table
-        .evaluate(&mut Nonce::new(), &input, &input_mac)
-        .unwrap()
-        .0;
+        .evaluate_bits(&verifier_key, &bits, &input_mac)
+        .unwrap();
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
 
@@ -850,9 +851,8 @@ fn test_groth16_serde_roundtrip() {
     let mut reader = BufReader::new(file);
     let deserialised_table = Table::deserialize_compressed(&mut reader).unwrap();
     let deserialised_output = deserialised_table
-        .evaluate(&mut Nonce::new(), &input, &input_mac)
-        .unwrap()
-        .0;
+        .evaluate_bits(&verifier_key, &bits, &input_mac)
+        .unwrap();
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
 
@@ -866,7 +866,6 @@ fn test_malformed_groth16() {
     use crate::utils::group::get_curve_point_not_in_g2;
 
     let mut rng = StdRng::seed_from_u64(0);
-    let secret = Fq::rand(&mut rng);
 
     let mut valid = Input::random(&mut rng);
     valid.x = [Fr::ZERO];
@@ -878,9 +877,11 @@ fn test_malformed_groth16() {
     };
     verifier_key.c = verifier_key.pairing(&valid).unwrap().inverse().unwrap();
 
-    let input_mac_key = InputMacKey::random_key(&mut rng);
-    let gid = GID::random(&mut rng);
-    let table = garble_groth16(0, secret, verifier_key, &input_mac_key, gid).unwrap();
+    let Garbling {
+        table,
+        secret,
+        input_mac_key,
+    } = garble(&verifier_key, [0; 32]).unwrap();
 
     let mut inputs = [valid; 4];
     // x = r passes the pairing check, so only the range check reveals `secret`.
@@ -895,9 +896,9 @@ fn test_malformed_groth16() {
 
     for input in inputs {
         let input_mac = input_mac_key.encode(&input);
-        let output = table.evaluate(&mut Nonce::new(), &input, &input_mac);
+        let output = table.evaluate_bits(&verifier_key, &(&input).into(), &input_mac);
         aes_ctr_clear_set();
         aes_mitccr_clear_set();
-        assert_eq!(output.unwrap().0, secret);
+        assert_eq!(output.unwrap(), Some(secret));
     }
 }

@@ -3,7 +3,7 @@
 
 use std::any::type_name;
 
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{
@@ -93,7 +93,7 @@ impl Circuit<bool, Bit16ByteMac, bool, Bit16ByteMac> for Table<AesCtr, Bit16Byte
 
     fn garble(
         parent_nonce: &mut Nonce,
-        _rng: &mut StdRng,
+        _rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &Bit16ByteMacKey,
     ) -> Result<(Self, Bit16ByteMacKey), GarbleError> {
@@ -171,7 +171,7 @@ impl Circuit<bool, Bit16ByteMac, bool, Bit16ByteMac> for Table<AesCtr, Bit16Byte
 
 #[test]
 fn test_aes_ctr_bytes_to_bytes_adaptor() {
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     use crate::{
         mac::{Mac, MacKey, Random},

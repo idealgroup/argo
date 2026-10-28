@@ -1,11 +1,8 @@
 use argo::{
-    garble::{
-        Circuit, Nonce,
-        groth16_verifier::{GID, Input, InputMac, InputMacKey, VerifierKey, garble_groth16},
-    },
-    mac::{MacKey, Random},
+    garble::groth16_verifier::{Input, InputBits, InputMac, VerifierKey, evaluate, garble},
+    mac::MacKey,
 };
-use ark_bn254::{Bn254, Fq, Fr, G1Affine, G2Affine};
+use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
 use ark_ec::{AffineRepr, pairing::Pairing};
 use ark_ff::UniformRand;
 use ark_std::rand::{SeedableRng, rngs::StdRng};
@@ -18,9 +15,6 @@ static GLOBAL: MiMalloc = MiMalloc;
 fn invalid_snark(c: &mut Criterion) {
     const SEED: u64 = 0;
     let mut rng = StdRng::seed_from_u64(SEED);
-
-    let secret = Fq::rand(&mut rng);
-    let gid = GID::random(&mut rng);
 
     let input = Input {
         A: G1Affine::rand(&mut rng).into(),
@@ -36,39 +30,30 @@ fn invalid_snark(c: &mut Criterion) {
         c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,
     };
 
-    let input_mac_key = InputMacKey::random_key(&mut rng);
-
     let mut garble_group = c.benchmark_group("groth16-garble");
     garble_group.sample_size(100);
     garble_group.bench_function("garble", |b| {
         let mut res = None;
         b.iter(|| {
-            res = Some(garble_groth16(SEED, secret, verifier_key, &input_mac_key, gid).unwrap());
+            res = Some(garble(&verifier_key, [0; 32]).unwrap());
         })
     });
     garble_group.finish();
 
-    let table = garble_groth16(SEED, secret, verifier_key, &input_mac_key, gid).unwrap();
+    let garbling = garble(&verifier_key, [0; 32]).unwrap();
 
-    let input_mac: InputMac = input_mac_key.encode(&input);
+    let input_mac: InputMac = garbling.input_mac_key.encode(&input);
+    let bits = InputBits::from(&input);
 
     let mut evaluate_group = c.benchmark_group("groth16-evaluate");
     evaluate_group.sample_size(100);
     evaluate_group.bench_function("evaluate", |b| {
-        b.iter(|| {
-            table
-                .evaluate(&mut Nonce::new(), &input, &input_mac)
-                .unwrap()
-                .0
-        })
+        b.iter(|| evaluate(&verifier_key, &garbling.table, &bits, &input_mac))
     });
 
-    let output = table
-        .evaluate(&mut Nonce::new(), &input, &input_mac)
-        .unwrap()
-        .0;
+    let output = evaluate(&verifier_key, &garbling.table, &bits, &input_mac);
 
-    assert_eq!(output, secret);
+    assert_eq!(output, Some(garbling.secret));
 }
 
 criterion_group!(benches, invalid_snark);

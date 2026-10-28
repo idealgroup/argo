@@ -23,7 +23,6 @@ use std::{any::type_name, marker::PhantomData};
 use ark_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::RngCore;
 
 #[cfg(test)]
 use ark_bn254::Fr;
@@ -68,7 +67,7 @@ where
 
     fn garble(
         parent_nonce: &mut crate::garble::Nonce,
-        rng: &mut ark_std::rand::prelude::StdRng,
+        rng: &mut impl rand_core::CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &DigitMacKey<F>,
     ) -> Result<(Self, IdentityMacKey), GarbleError> {

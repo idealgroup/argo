@@ -14,7 +14,7 @@ use ark_bn254::Fq;
 use ark_ec::{AffineRepr, scalar_mul::glv::GLVConfig, short_weierstrass::Affine};
 use ark_ff::{Field, batch_inversion};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{RngCore, rngs::StdRng};
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{
@@ -152,7 +152,7 @@ where
     /// Panics if Config::COEFF_A is nonzero.
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey<F>,
     ) -> Result<(Self, OutputMacKey<Config, KAPPA>), GarbleError> {
@@ -424,7 +424,10 @@ where
         garble::bit_adaptor::clear_set as bit_adaptor_clear_set, mac::MacKey,
         utils::aes_hash::aes_ctr::clear_set as aes_ctr_clear_set,
     };
-    use ark_std::{UniformRand, rand::SeedableRng};
+    use ark_std::{
+        UniformRand,
+        rand::{SeedableRng, rngs::StdRng},
+    };
 
     let mut rng = StdRng::seed_from_u64(seed);
 

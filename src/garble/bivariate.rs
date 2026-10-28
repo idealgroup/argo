@@ -8,7 +8,7 @@ use ark_ec::{
 };
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{Circuit, digit_adaptor},
@@ -23,7 +23,7 @@ use crate::{
 #[cfg(test)]
 use crate::{garble::Nonce, utils::aes_hash::aes_ctr::clear_set};
 #[cfg(test)]
-use ark_std::rand::SeedableRng;
+use ark_std::rand::{SeedableRng, rngs::StdRng};
 
 /// Powers of a monomial where (i, j) represents x^i y^j.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, CanonicalDeserialize, CanonicalSerialize)]
@@ -243,7 +243,7 @@ where
         }
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         Self {
             x: bytes::DigitMacKey::random_key(rng),
             y: bytes::DigitMacKey::random_key(rng),
@@ -258,7 +258,7 @@ where
     type Key = InputMacKey<F>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Input<F> {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Input<F> {
         Input {
             x: F::rand(rng),
             y: F::rand(rng),
@@ -304,7 +304,7 @@ where
 
     fn garble(
         parent_nonce: &mut super::Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac<F> as Mac<Input<F>>>::Key,
     ) -> Result<(Self, <IdentityMac<F> as Mac<F>>::Key), GarbleError> {
@@ -375,7 +375,7 @@ where
 }
 
 #[cfg(test)]
-fn test_biquadratic<F>(coeffs: [Option<F>; 6], rng: &mut StdRng)
+fn test_biquadratic<F>(coeffs: [Option<F>; 6], rng: &mut impl CryptoRngCore)
 where
     F: Field + NumBits + FromBits<bool, F> + Random + ToBits + FromBits<F, F>,
     F::BasePrimeField: FromLeBytesModOrder,

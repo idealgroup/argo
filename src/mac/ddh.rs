@@ -71,7 +71,7 @@ where
         unimplemented!()
     }
 
-    fn random_key(_rng: &mut ark_std::rand::prelude::StdRng) -> Self {
+    fn random_key(_rng: &mut impl rand_core::CryptoRngCore) -> Self {
         unimplemented!()
     }
 }

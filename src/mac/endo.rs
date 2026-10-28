@@ -14,8 +14,9 @@ use ark_ec::{
 };
 use ark_ff::{BigInt, Field, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{Rng, rngs::StdRng};
+use ark_std::rand::Rng;
 use derive_more::Deref;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{bivariate::Poly, groth16_verifier::KAPPA_B},
@@ -48,7 +49,7 @@ impl<G> Default for EndoScalar<G> {
 }
 
 impl<G: GLVConfig> Random for EndoScalar<G> {
-    fn random(rng: &mut StdRng) -> EndoScalar<G> {
+    fn random(rng: &mut impl CryptoRngCore) -> EndoScalar<G> {
         let exp = rng.gen_range(0..ENDO_SIZE);
         Self::from_u8(exp as u8)
     }
@@ -312,7 +313,9 @@ where
         Self::neg(&Self::mod_sum(endoscalars))
     }
 
-    pub(crate) fn sample_endoscalars_with_checksum<const N: usize>(rng: &mut StdRng) -> Vec<Self> {
+    pub(crate) fn sample_endoscalars_with_checksum<const N: usize>(
+        rng: &mut impl CryptoRngCore,
+    ) -> Vec<Self> {
         let mut res = vec![Self::Zero(PhantomData); N];
         res.iter_mut()
             .take(N - 1)
@@ -417,7 +420,7 @@ where
     type Key = EndoMacKey<G, Affine<G>>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Affine<G> {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Affine<G> {
         use ark_std::rand::{distributions::Standard, prelude::Distribution as _};
 
         Standard.sample(rng)
@@ -427,7 +430,7 @@ where
 impl RandomFromPhi<Affine<g1::Config>, EndoMacG1> for EndoMacKeyG1 {
     type Phi = EndoScalar<g1::Config>;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &EndoScalar<g1::Config>) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &EndoScalar<g1::Config>) -> Self {
         let k_scalar = Fr::rand(rng);
         let k = (Projective::<g1::Config>::generator() * k_scalar).into_affine();
 
@@ -442,7 +445,7 @@ impl RandomFromPhi<Affine<g1::Config>, EndoMacG1> for EndoMacKeyG1 {
 impl RandomFromPhi<Affine<g2::Config>, EndoMacG2> for EndoMacKeyG2 {
     type Phi = EndoScalar<g2::Config>;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &EndoScalar<g2::Config>) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &EndoScalar<g2::Config>) -> Self {
         let k = get_curve_point_not_in_g2(rng);
 
         Self {
@@ -456,7 +459,7 @@ impl RandomFromPhi<Affine<g2::Config>, EndoMacG2> for EndoMacKeyG2 {
 impl RandomFromPhi<Fq12, EndoMacFq12> for EndoMacKeyFq12 {
     type Phi = EndoScalar<g2::Config>;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &EndoScalar<g2::Config>) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &EndoScalar<g2::Config>) -> Self {
         Self {
             phi: phi.clone(),
             k_scalar: None,
@@ -488,7 +491,7 @@ where
         unimplemented!()
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let phi = EndoScalar::random(rng);
         Self::random_from_phi(rng, &phi)
     }
@@ -501,7 +504,7 @@ where
     type Key = EndoMacKeyFq12;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Fq12 {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Fq12 {
         use ark_std::rand::{distributions::Standard, prelude::Distribution as _};
 
         Standard.sample(rng)
@@ -525,7 +528,7 @@ where
         unimplemented!()
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let phi = EndoScalar::random(rng);
         Self::random_from_phi(rng, &phi)
     }
@@ -563,7 +566,7 @@ fn test_gt_mac_commute() {
     use ark_bn254::g1::Config as G;
     use ark_bn254::{Bn254, G1Affine, G2Affine};
     use ark_ec::{AffineRepr, pairing::Pairing};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const SEED: u64 = 0;
 

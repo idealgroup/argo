@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, ops::Deref};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{RngCore, rngs::StdRng};
+use rand_core::CryptoRngCore;
 
 use crate::mac::{
     Mac, MacKey, RandomFromPhi,
@@ -32,7 +32,7 @@ impl<Op: BooleanOp> From<BitMacKey<Op>> for Bit16ByteMacKey {
 impl<Op: BooleanOp> RandomFromPhi<bool, BitMac<Op>> for BitMacKey<Op> {
     type Phi = [u8; 16];
 
-    fn random_from_phi(rng: &mut StdRng, phi: &Self::Phi) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &Self::Phi) -> Self {
         Self {
             key: Bit16ByteMacKey::random_from_phi(rng, phi),
             _marker: PhantomData,
@@ -100,7 +100,7 @@ impl<Op: BooleanOp> MacKey<bool, BitMac<Op>> for BitMacKey<Op> {
         self.key.decode(mac)
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         Self {
             key: Bit16ByteMacKey::random_key(rng),
             _marker: PhantomData,
@@ -169,7 +169,7 @@ impl<Op: BooleanOp> Mac<bool> for BitMac<Op> {
     type Key = BitMacKey<Op>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> bool {
+    fn random_input(rng: &mut impl CryptoRngCore) -> bool {
         use ark_std::rand::Rng;
 
         rng.gen_bool(0.5)
@@ -244,7 +244,7 @@ impl<Op: BooleanOp> Mac<BinaryInput<Op>> for BinaryInputMac<Op> {
     type Key = BinaryInputMacKey<Op>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> BinaryInput<Op> {
+    fn random_input(rng: &mut impl CryptoRngCore) -> BinaryInput<Op> {
         use ark_std::rand::Rng;
 
         BinaryInput {
@@ -279,7 +279,7 @@ impl<Op: BooleanOp> MacKey<BinaryInput<Op>, BinaryInputMac<Op>> for BinaryInputM
     }
 
     // phi's have to be the same for left and right
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let mut phi = [0; 16];
         rng.fill_bytes(&mut phi);
 

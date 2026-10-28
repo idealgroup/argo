@@ -1,7 +1,6 @@
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 #[cfg(test)]
 use ark_std::rand::Rng;
-use ark_std::rand::RngCore;
 
 use crate::{
     garble::{
@@ -67,7 +66,7 @@ impl Mac<Input> for InputMac {
     type Key = InputMacKey;
 
     #[cfg(test)]
-    fn random_input(rng: &mut ark_std::rand::prelude::StdRng) -> Input {
+    fn random_input(rng: &mut impl rand_core::CryptoRngCore) -> Input {
         Input {
             x: rng.gen_bool(0.5),
             p: rng.gen_bool(0.5),
@@ -94,7 +93,7 @@ impl MacKey<Input, InputMac> for InputMacKey {
         }
     }
 
-    fn random_key(rng: &mut ark_std::rand::prelude::StdRng) -> Self {
+    fn random_key(rng: &mut impl rand_core::CryptoRngCore) -> Self {
         let mut phi = [0; 16];
         rng.fill_bytes(&mut phi);
         Self {
@@ -110,7 +109,7 @@ impl Circuit<Input, InputMac, bool, Bit16ByteMac> for Table {
 
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut ark_std::rand::prelude::StdRng,
+        rng: &mut impl rand_core::CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac as Mac<Input>>::Key,
     ) -> Result<(Self, <Bit16ByteMac as Mac<bool>>::Key), GarbleError> {

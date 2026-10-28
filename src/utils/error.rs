@@ -14,6 +14,8 @@ pub enum GarbleError {
     MissingDST,
     #[error("Missing k_scalar in {0} EndoMacKey.")]
     MissingKScalar(&'static str),
+    #[error("The verifier key's pairing constant is zero.")]
+    DegenerateVerifierKey,
 }
 
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{Circuit, Nonce},
@@ -59,7 +59,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
 
     fn garble(
         _parent_nonce: &mut Nonce,
-        _rng: &mut StdRng,
+        _rng: &mut impl CryptoRngCore,
         _aux: Option<Self::Aux>,
         input_mac_key: &<BinaryInputMac<Xor> as Mac<BinaryInput<Xor>>>::Key,
     ) -> Result<(Self, <OutputMac as Mac<bool>>::Key), GarbleError> {
@@ -80,7 +80,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
 #[test]
 fn test_xor_circuit() {
     use crate::mac::MacKey;
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const SEED: u64 = 0;
 

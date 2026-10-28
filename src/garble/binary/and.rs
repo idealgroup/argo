@@ -29,7 +29,7 @@
 use std::{any::type_name, marker::PhantomData};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 #[cfg(test)]
 use crate::utils::aes_hash::aes_mitccr::clear_set;
@@ -74,7 +74,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
 
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey,
     ) -> Result<(Self, OutputMacKey), GarbleError> {
@@ -149,7 +149,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
 #[test]
 fn test_and_circuit() {
     use crate::mac::{Mac, MacKey, Random};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const N: usize = 100;
     const SEED: u64 = 0;

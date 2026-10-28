@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use ark_bn254::{Bn254, Fq, Fq2, Fq12, Fr, g2};
 use ark_ec::{AffineRepr, pairing::Pairing, short_weierstrass::Affine};
 use ark_ff::{BigInt, PrimeField};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::utils::error::EvalError;
 
@@ -120,7 +120,7 @@ impl FromLeBytesModOrder for Fr {
     }
 }
 
-pub(crate) fn get_curve_point_not_in_g2(rng: &mut StdRng) -> Affine<g2::Config> {
+pub(crate) fn get_curve_point_not_in_g2(rng: &mut impl CryptoRngCore) -> Affine<g2::Config> {
     use ark_ff::UniformRand;
     use ark_std::Zero;
 

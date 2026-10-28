@@ -1,4 +1,4 @@
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     mac::Mac,
@@ -27,7 +27,7 @@ where
     /// Given an input_mac_key, return a garbling table and an output MAC key
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac as Mac<InputValue>>::Key,
     ) -> Result<(Self, <OutputMac as Mac<OutputValue>>::Key), GarbleError>;
@@ -63,10 +63,14 @@ impl Nonce {
         }
     }
 
-    /// Returns self.counters as a [u8; 16].
+    /// Returns self.counters as a [u8; 16], each counter little-endian.
     #[inline]
     pub fn bytes(&self) -> [u8; 16] {
-        unsafe { std::mem::transmute(self.counters) }
+        let mut bytes = [0; 16];
+        for (bytes, counter) in bytes.chunks_exact_mut(2).zip(self.counters) {
+            bytes.copy_from_slice(&counter.to_le_bytes());
+        }
+        bytes
     }
 
     /// Forks the parent nonce to return a child nonce
@@ -87,4 +91,17 @@ impl Nonce {
     fn update(&mut self) {
         self.counters[self.level] += 1;
     }
+}
+
+#[test]
+fn test_nonce_bytes_are_little_endian() {
+    let mut nonce = Nonce::new();
+    for _ in 0..0x0102 {
+        nonce.fork();
+    }
+    let mut child = nonce.fork();
+    child.fork();
+    let mut expected = [0; 16];
+    expected[..4].copy_from_slice(&[0x03, 0x01, 0x01, 0x00]);
+    assert_eq!(child.bytes(), expected);
 }

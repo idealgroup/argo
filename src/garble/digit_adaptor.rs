@@ -22,7 +22,7 @@ use crate::{
 };
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug)]
 pub(crate) struct Table<F>(Vec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<F>>>)
@@ -59,7 +59,7 @@ where
     #[inline(never)]
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey<F>,
     ) -> Result<(Self, OutputMacKey<F>), GarbleError> {
@@ -109,7 +109,7 @@ where
     F: Field + NumBits + ToBits + FromBits<F, F> + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder,
 {
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     use crate::{mac::MacKey, utils::aes_hash::aes_ctr::clear_set};
 

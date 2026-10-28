@@ -75,7 +75,7 @@ impl<const N: usize> Table<N> {
 
     pub(crate) fn garble(
         parent_nonce: &mut crate::garble::Nonce,
-        rng: &mut ark_std::rand::prelude::StdRng,
+        rng: &mut impl rand_core::CryptoRngCore,
         aux: &Aux,
         input_mac_key: &InputMacKey<N>,
     ) -> Result<Self, GarbleError> {

@@ -7,7 +7,8 @@ use ark_ec::{
 };
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{UniformRand, rand::rngs::StdRng};
+use ark_std::UniformRand;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{Circuit, Nonce, bit_adaptor},
@@ -70,7 +71,7 @@ where
     /// Derives an `OutputMacKey: [EndoMacKey; KAPPA]` given an input_mac_key
     /// and an array of `phi`s
     pub(crate) fn output_mac_key_from_phis(
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         input_mac_key: &GroupMacKey<C::ScalarField>,
         phis: &[EndoScalar<C>; KAPPA],
     ) -> ([Affine<C>; KAPPA], OutputMacKey<C, KAPPA>) {
@@ -130,7 +131,7 @@ where
 
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey<C>,
     ) -> Result<(Self, OutputMacKey<C, KAPPA>), GarbleError> {
@@ -225,7 +226,7 @@ fn test_scalar_mul_fixed() {
         garble::groth16_verifier::KAPPA_B, mac::MacKey, utils::aes_hash::aes_ctr::clear_set,
     };
     use ark_bn254::{Fr, G1Projective, g1::Config};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
     use std::ops::Mul;
 
     const SEED: u64 = 0;

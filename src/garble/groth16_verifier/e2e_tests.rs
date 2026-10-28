@@ -59,9 +59,8 @@ struct GarblerKeys {
 }
 
 struct Fixture {
-    secret: Fq,
-    input_mac_key: InputMacKey,
-    table: Table,
+    verifier_key: VerifierKey,
+    garbling: Garbling,
     keys: GarblerKeys,
     /// Valid proof of 3 * 11 = 33.
     proof: Input,
@@ -94,19 +93,13 @@ fn fixture() -> &'static Fixture {
         assert_eq!(verifier_key.pairing(&proof).unwrap(), Fq12::ONE);
         assert_eq!(verifier_key.pairing(&zero_proof).unwrap(), Fq12::ONE);
 
-        let secret = Fq::rand(&mut rng);
-        let input_mac_key = InputMacKey::random_key(&mut rng);
-        let gid = GID::random(&mut rng);
-        let table = garble_groth16(SEED, secret, verifier_key, &input_mac_key, gid).unwrap();
-        assert!(table.has_garbled_shape());
-
-        let keys = garbler_keys();
-        assert_replayed_keys(&table, &input_mac_key, &keys, &proof);
+        let garbling = garble_with(SEED, &verifier_key);
+        let keys = garbler_keys::<1>(SEED);
+        assert_replayed_keys(&garbling, &keys, &proof);
 
         Fixture {
-            secret,
-            input_mac_key,
-            table,
+            verifier_key,
+            garbling,
             keys,
             proof,
             zero_proof,
@@ -123,9 +116,24 @@ fn proof_input<const N: usize>(proof: &Proof<Bn254>, x: [Fr; N]) -> Input<N> {
     }
 }
 
-/// Replays `Table::garble`'s RNG draws up to and including the C mask keys.
-fn garbler_keys() -> GarblerKeys {
-    let mut rng = StdRng::seed_from_u64(SEED);
+fn seed_bytes(seed: u64) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    bytes
+}
+
+fn garble_with<const N: usize>(seed: u64, verifier_key: &VerifierKey<N>) -> Garbling<N> {
+    let garbling = garble(verifier_key, seed_bytes(seed)).unwrap();
+    assert!(garbling.table.has_garbled_shape());
+    garbling
+}
+
+/// Replays `garble`'s RNG draws up to and including the C mask keys.
+fn garbler_keys<const N: usize>(seed: u64) -> GarblerKeys {
+    let mut rng = ChaCha20Rng::from_seed(seed_bytes(seed));
+    while Fq::rand(&mut rng).is_zero() {}
+    InputMacKey::<N>::random_key(&mut rng);
+    GID::random(&mut rng);
     let rs: [Fr; KAPPA_B] = std::array::from_fn(|_| Fr::rand(&mut rng));
     let x = Fr::rand(&mut rng);
     let a = a_ec_mac_key(&mut rng, x).to_vec();
@@ -145,11 +153,15 @@ fn garbler_keys() -> GarblerKeys {
 /// The replayed keys must be the ones inside the garbled converters, otherwise
 /// the crafted inputs below would only be random invalid proofs.
 fn assert_replayed_keys<const N: usize>(
-    table: &Table<N>,
-    input_mac_key: &InputMacKey<N>,
+    garbling: &Garbling<N>,
     keys: &GarblerKeys,
     input: &Input<N>,
 ) {
+    let Garbling {
+        table,
+        input_mac_key,
+        ..
+    } = garbling;
     let input_mac = input_mac_key.encode(input);
     let mut nonce = Nonce::new();
     assert!(
@@ -207,44 +219,51 @@ fn doubling_input<G: GLVConfig + PSqModR>(keys: &[EndoMacKey<G, Affine<G>>]) -> 
 }
 
 fn evaluate_table<const N: usize>(
+    verifier_key: &VerifierKey<N>,
     table: &Table<N>,
     input_mac_key: &InputMacKey<N>,
     input: &Input<N>,
-) -> Result<Fq, EvalError> {
-    let input_mac = input_mac_key.encode(input);
-    aes_ctr_clear_set();
-    aes_mitccr_clear_set();
-    let output = table.evaluate(&mut Nonce::new(), input, &input_mac);
-    aes_ctr_clear_set();
-    aes_mitccr_clear_set();
-    output.map(|(output, _)| output)
+) -> Result<Option<Fq>, EvalError> {
+    evaluate_raw(verifier_key, table, input_mac_key, &input.into())
 }
 
-fn evaluate(input: &Input) -> Result<Fq, EvalError> {
+fn evaluate_garbling<const N: usize>(
+    verifier_key: &VerifierKey<N>,
+    garbling: &Garbling<N>,
+    input: &Input<N>,
+) -> Result<Option<Fq>, EvalError> {
+    evaluate_table(
+        verifier_key,
+        &garbling.table,
+        &garbling.input_mac_key,
+        input,
+    )
+}
+
+fn evaluate(input: &Input) -> Result<Option<Fq>, EvalError> {
     let f = fixture();
-    evaluate_table(&f.table, &f.input_mac_key, input)
+    evaluate_garbling(&f.verifier_key, &f.garbling, input)
 }
 
 /// Asserts every case reveals the secret, reporting all failing cases at once.
 fn assert_reveal(cases: Vec<(&str, Input)>) {
     let f = fixture();
-    assert_reveals(&f.table, &f.input_mac_key, f.secret, cases);
+    assert_reveals(&f.verifier_key, &f.garbling, cases);
 }
 
 fn assert_reveals<const N: usize>(
-    table: &Table<N>,
-    input_mac_key: &InputMacKey<N>,
-    secret: Fq,
+    verifier_key: &VerifierKey<N>,
+    garbling: &Garbling<N>,
     cases: Vec<(&str, Input<N>)>,
 ) {
     let failures: Vec<_> = cases
         .into_iter()
         .filter_map(|(name, input)| {
-            let evaluate = || evaluate_table(table, input_mac_key, &input);
+            let evaluate = || evaluate_garbling(verifier_key, garbling, &input);
             let outcome = match catch_unwind(AssertUnwindSafe(evaluate)) {
-                Ok(Ok(output)) if output == secret => return None,
-                Ok(Ok(output)) if output.is_zero() => "accepted".to_owned(),
-                Ok(Ok(_)) => "wrong output".to_owned(),
+                Ok(Ok(Some(output))) if output == garbling.secret => return None,
+                Ok(Ok(None)) => "accepted".to_owned(),
+                Ok(Ok(Some(_))) => "wrong output".to_owned(),
                 Ok(Err(error)) => format!("{error:?}"),
                 Err(_) => "panicked".to_owned(),
             };
@@ -290,8 +309,8 @@ fn off_subgroup_twist_point(rng: &mut StdRng) -> G2Affine {
 #[test]
 fn valid_proofs_reveal_nothing() {
     let f = fixture();
-    assert_eq!(evaluate(&f.proof).unwrap(), Fq::ZERO);
-    assert_eq!(evaluate(&f.zero_proof).unwrap(), Fq::ZERO);
+    assert_eq!(evaluate(&f.proof).unwrap(), None);
+    assert_eq!(evaluate(&f.zero_proof).unwrap(), None);
 }
 
 #[test]
@@ -336,10 +355,7 @@ fn malformed_proofs_reveal_secret() {
         x: [Fr::new_unchecked(Fr::MODULUS)],
         ..f.zero_proof
     };
-    assert_eq!(
-        f.table.verifier_key.pairing(&non_canonical_x).unwrap(),
-        Fq12::ONE
-    );
+    assert_eq!(f.verifier_key.pairing(&non_canonical_x).unwrap(), Fq12::ONE);
 
     let mut cases = vec![("x = r", non_canonical_x)];
     for (name, input) in [
@@ -497,19 +513,6 @@ fn mul_add_proof(
     (proof, [a * b, a + b])
 }
 
-fn garble_with<const N: usize>(
-    rng: &mut StdRng,
-    seed: u64,
-    verifier_key: VerifierKey<N>,
-) -> (Fq, InputMacKey<N>, Table<N>) {
-    let secret = Fq::rand(rng);
-    let input_mac_key = InputMacKey::random_key(rng);
-    let gid = GID::random(rng);
-    let table = garble_groth16(seed, secret, verifier_key, &input_mac_key, gid).unwrap();
-    assert!(table.has_garbled_shape());
-    (secret, input_mac_key, table)
-}
-
 /// Constant public inputs are folded into `c`, so each statement gets its own
 /// garbling and the evaluator holds no labels for them.
 #[test]
@@ -525,15 +528,21 @@ fn constant_inputs_change_per_garbling() {
     assert_eq!(vk1.pairing(&proof1).unwrap(), Fq12::ONE);
     assert_eq!(vk2.pairing(&proof2).unwrap(), Fq12::ONE);
 
-    let (secret1, key1, table1) = garble_with(&mut rng, SEED, vk1);
-    let (secret2, key2, table2) = garble_with(&mut rng, SEED + 1, vk2);
-    assert_replayed_keys(&table1, &key1, &garbler_keys(), &proof1);
+    let garbling1 = garble_with(SEED, &vk1);
+    let garbling2 = garble_with(SEED + 1, &vk2);
+    assert_replayed_keys(&garbling1, &garbler_keys::<0>(SEED), &proof1);
 
-    assert_eq!(evaluate_table(&table1, &key1, &proof1).unwrap(), Fq::ZERO);
-    assert_eq!(evaluate_table(&table2, &key2, &proof2).unwrap(), Fq::ZERO);
+    assert_eq!(evaluate_garbling(&vk1, &garbling1, &proof1).unwrap(), None);
+    assert_eq!(evaluate_garbling(&vk2, &garbling2, &proof2).unwrap(), None);
     // A valid proof for other constants is an invalid proof for this garbling.
-    assert_eq!(evaluate_table(&table1, &key1, &proof2).unwrap(), secret1);
-    assert_eq!(evaluate_table(&table2, &key2, &proof1).unwrap(), secret2);
+    assert_eq!(
+        evaluate_garbling(&vk1, &garbling1, &proof2).unwrap(),
+        Some(garbling1.secret)
+    );
+    assert_eq!(
+        evaluate_garbling(&vk2, &garbling2, &proof1).unwrap(),
+        Some(garbling2.secret)
+    );
 }
 
 #[test]
@@ -544,8 +553,8 @@ fn zero_garbled_inputs_reveal_on_bad_proofs() {
     let verifier_key =
         VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
     let proof = proof_input(&proof, []);
-    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
-    let keys = garbler_keys();
+    let garbling = garble_with(SEED, &verifier_key);
+    let keys = garbler_keys::<0>(SEED);
 
     let (A, B, C): (G1Affine, G2Affine, G1Affine) =
         (proof.A.into(), proof.B.into(), proof.C.into());
@@ -554,9 +563,8 @@ fn zero_garbled_inputs_reveal_on_bad_proofs() {
     let b = doubling_input(&keys.b);
     let c = doubling_input(&keys.c);
     assert_reveals(
-        &table,
-        &key,
-        secret,
+        &verifier_key,
+        &garbling,
         vec![
             (
                 "A + G",
@@ -597,12 +605,13 @@ fn circuit_without_public_inputs() {
     let proof = Groth16::<Bn254>::prove(&pk, Idempotent { a: Some(Fr::ONE) }, &mut rng).unwrap();
     let proof = proof_input(&proof, []);
     let verifier_key = VerifierKey::<0>::from_groth16(&vk, &[]).unwrap();
-    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+    let garbling = garble_with(SEED, &verifier_key);
 
-    assert_eq!(evaluate_table(&table, &key, &proof).unwrap(), Fq::ZERO);
+    let evaluate = |input| evaluate_garbling(&verifier_key, &garbling, input).unwrap();
+    assert_eq!(evaluate(&proof), None);
     let C: G1Affine = proof.C.into();
     let invalid = with_c(&proof, (C + G1Affine::generator()).into_affine());
-    assert_eq!(evaluate_table(&table, &key, &invalid).unwrap(), secret);
+    assert_eq!(evaluate(&invalid), Some(garbling.secret));
 }
 
 /// One input fixed at garbling time and one garbled.
@@ -615,14 +624,15 @@ fn constant_and_garbled_inputs() {
         VerifierKey::<1>::from_groth16(&vk, &[PublicInput::Constant(x1), PublicInput::Garbled])
             .unwrap();
     let proof = proof_input(&proof, [x2]);
-    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+    let garbling = garble_with(SEED, &verifier_key);
 
-    assert_eq!(evaluate_table(&table, &key, &proof).unwrap(), Fq::ZERO);
+    let evaluate = |input| evaluate_garbling(&verifier_key, &garbling, input).unwrap();
+    assert_eq!(evaluate(&proof), None);
     let wrong_x2 = Input {
         x: [x2 + Fr::ONE],
         ..proof
     };
-    assert_eq!(evaluate_table(&table, &key, &wrong_x2).unwrap(), secret);
+    assert_eq!(evaluate(&wrong_x2), Some(garbling.secret));
 }
 
 #[test]
@@ -671,14 +681,15 @@ fn with_component<const N: usize>(
 }
 
 fn evaluate_raw<const N: usize>(
+    verifier_key: &VerifierKey<N>,
     table: &Table<N>,
     input_mac_key: &InputMacKey<N>,
     bits: &InputBits<N>,
-) -> Result<Fq, EvalError> {
+) -> Result<Option<Fq>, EvalError> {
     let input_mac = input_mac_key.encode_bits(bits);
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
-    let output = table.evaluate_bits(&mut Nonce::new(), bits, &input_mac);
+    let output = table.evaluate_bits(verifier_key, bits, &input_mac);
     aes_ctr_clear_set();
     aes_mitccr_clear_set();
     output
@@ -715,8 +726,9 @@ fn non_canonical_bits_reveal_secret() {
 
         for (value_name, value) in values {
             let bits = with_component(&valid, index, value);
-            match evaluate_raw(&f.table, &f.input_mac_key, &bits) {
-                Ok(output) if output == f.secret => {}
+            let g = &f.garbling;
+            match evaluate_raw(&f.verifier_key, &g.table, &g.input_mac_key, &bits) {
+                Ok(Some(output)) if output == g.secret => {}
                 output => failures.push(format!("{name} = {value_name}: {output:?}")),
             }
         }
@@ -728,8 +740,9 @@ fn non_canonical_bits_reveal_secret() {
 #[test]
 fn labels_from_pairs_match_encoding() {
     let f = fixture();
+    let g = &f.garbling;
     let bits = InputBits::from(&f.proof);
-    let pairs = f.input_mac_key.label_pairs();
+    let pairs = g.input_mac_key.label_pairs();
     assert_eq!(pairs.len(), InputBits::<1>::LEN);
     let labels: Vec<_> = pairs
         .iter()
@@ -737,11 +750,11 @@ fn labels_from_pairs_match_encoding() {
         .map(|(pair, bit)| pair[*bit as usize])
         .collect();
     let input_mac = InputMac::from_labels(&labels).unwrap();
-    assert_eq!(input_mac, f.input_mac_key.encode(&f.proof));
-    assert_eq!(input_mac, f.input_mac_key.encode_bits(&bits));
+    assert_eq!(input_mac, g.input_mac_key.encode(&f.proof));
+    assert_eq!(input_mac, g.input_mac_key.encode_bits(&bits));
     assert_eq!(
-        evaluate_raw(&f.table, &f.input_mac_key, &bits).unwrap(),
-        Fq::ZERO
+        super::evaluate(&f.verifier_key, &g.table, &bits, &input_mac),
+        None
     );
 
     assert_eq!(InputBits::<0>::LEN, 2032);
@@ -768,15 +781,21 @@ fn non_canonical_bits_without_garbled_inputs() {
     let (proof, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
     let verifier_key =
         VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
-    let (secret, key, table) = garble_with(&mut rng, SEED, verifier_key);
+    let Garbling {
+        table,
+        secret,
+        input_mac_key,
+    } = garble_with(SEED, &verifier_key);
+    let evaluate =
+        |bits: &InputBits<0>| evaluate_raw(&verifier_key, &table, &input_mac_key, bits).unwrap();
     let valid = InputBits::from(&proof_input(&proof, []));
-    assert_eq!(evaluate_raw(&table, &key, &valid).unwrap(), Fq::ZERO);
+    assert_eq!(evaluate(&valid), None);
 
     for index in 0..8 {
         let mut plus_one = Fq::MODULUS;
         plus_one.add_with_carry(&BigInt::one());
         let bits = with_component(&valid, index, plus_one);
-        assert_eq!(evaluate_raw(&table, &key, &bits).unwrap(), secret);
+        assert_eq!(evaluate(&bits), Some(secret));
     }
 }
 
@@ -795,7 +814,7 @@ fn deserialize(bytes: &[u8]) -> Table {
 #[test]
 fn malformed_tables_are_rejected() {
     let f = fixture();
-    let bytes = serialize(&f.table);
+    let bytes = serialize(&f.garbling.table);
     for len in [0, 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(Table::<1>::deserialize_compressed(&bytes[..len]).is_err());
     }
@@ -830,7 +849,7 @@ fn malformed_tables_are_rejected() {
         mutate(&mut table);
         let table = deserialize(&serialize(&table));
         assert!(!table.has_garbled_shape(), "{name}");
-        let output = evaluate_table(&table, &f.input_mac_key, &f.proof);
+        let output = evaluate_table(&f.verifier_key, &table, &f.garbling.input_mac_key, &f.proof);
         assert!(
             matches!(output, Err(EvalError::MalformedTable)),
             "{name}: {output:?}"
@@ -843,14 +862,16 @@ fn malformed_tables_are_rejected() {
 #[test]
 fn inconsistent_converters_do_not_panic() {
     let f = fixture();
-    let bytes = serialize(&f.table);
+    let bytes = serialize(&f.garbling.table);
+    let evaluate =
+        |table| evaluate_table(&f.verifier_key, table, &f.garbling.input_mac_key, &f.proof);
 
     let mut table = deserialize(&bytes);
     for x in &mut table.b_ec_mac.x {
         x.constant += Fq2::ONE;
     }
     assert!(table.has_garbled_shape());
-    let output = evaluate_table(&table, &f.input_mac_key, &f.proof);
+    let output = evaluate(&table);
     assert!(
         matches!(output, Err(EvalError::InvalidMacPoint)),
         "{output:?}"
@@ -860,7 +881,7 @@ fn inconsistent_converters_do_not_panic() {
     for x in &mut table.c_ec_mac.x {
         x.constant += Fq::ONE;
     }
-    let output = evaluate_table(&table, &f.input_mac_key, &f.proof);
+    let output = evaluate(&table);
     assert!(
         matches!(output, Err(EvalError::InvalidMacPoint)),
         "{output:?}"
@@ -877,16 +898,22 @@ fn two_circuits_in_one_process() {
         let (proof, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
         let verifier_key =
             VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
-        let (secret, key, table) = garble_with(&mut rng, seed, verifier_key);
-        (secret, key, table, proof_input(&proof, []))
+        let garbling = garble_with(seed, &verifier_key);
+        (verifier_key, garbling, proof_input(&proof, []))
     };
-    let (secret1, key1, table1, proof1) = garble_circuit(SEED);
-    let (secret2, key2, table2, proof2) = garble_circuit(SEED + 1);
+    let (vk1, garbling1, proof1) = garble_circuit(SEED);
+    let (vk2, garbling2, proof2) = garble_circuit(SEED + 1);
 
-    assert_eq!(evaluate_table(&table1, &key1, &proof1).unwrap(), Fq::ZERO);
-    assert_eq!(evaluate_table(&table2, &key2, &proof2).unwrap(), Fq::ZERO);
-    assert_eq!(evaluate_table(&table1, &key1, &proof2).unwrap(), secret1);
-    assert_eq!(evaluate_table(&table2, &key2, &proof1).unwrap(), secret2);
+    assert_eq!(evaluate_garbling(&vk1, &garbling1, &proof1).unwrap(), None);
+    assert_eq!(evaluate_garbling(&vk2, &garbling2, &proof2).unwrap(), None);
+    assert_eq!(
+        evaluate_garbling(&vk1, &garbling1, &proof2).unwrap(),
+        Some(garbling1.secret)
+    );
+    assert_eq!(
+        evaluate_garbling(&vk2, &garbling2, &proof1).unwrap(),
+        Some(garbling2.secret)
+    );
 }
 
 /// The AES key schedules cached during a call are labels of that garbling
@@ -901,9 +928,46 @@ fn aes_key_cache_is_cleared_after_each_call() {
     let (_, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
     let verifier_key =
         VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap();
-    garble_with(&mut rng, SEED + 2, verifier_key);
+    garble_with(SEED, &verifier_key);
     assert_eq!(cached_instances(), 0);
 
     evaluate(&f.proof).unwrap();
     assert_eq!(cached_instances(), 0);
+}
+
+/// Cut-and-choose opens an instance by its seed, so regarbling the seed must
+/// give the same table, secret and labels.
+#[test]
+fn same_seed_rebuilds_the_instance() {
+    let f = fixture();
+    let again = garble_with(SEED, &f.verifier_key);
+    assert_eq!(serialize(&again.table), serialize(&f.garbling.table));
+    assert_eq!(again.secret, f.garbling.secret);
+    assert_eq!(
+        again.input_mac_key.label_pairs(),
+        f.garbling.input_mac_key.label_pairs()
+    );
+
+    let other = garble_with(SEED + 1, &f.verifier_key);
+    assert_ne!(serialize(&other.table), serialize(&f.garbling.table));
+    assert_ne!(other.secret, f.garbling.secret);
+}
+
+#[test]
+fn garble_rejects_a_zero_pairing_constant() {
+    let verifier_key = VerifierKey::<0> {
+        c: Fq12::ZERO,
+        ..fixture_without_garbled_inputs()
+    };
+    assert!(matches!(
+        garble(&verifier_key, seed_bytes(SEED)),
+        Err(GarbleError::DegenerateVerifierKey)
+    ));
+}
+
+fn fixture_without_garbled_inputs() -> VerifierKey<0> {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pk, vk) = mul_add_setup(&mut rng);
+    let (_, inputs) = mul_add_proof(&pk, &mut rng, 3, 11);
+    VerifierKey::<0>::from_groth16(&vk, &inputs.map(PublicInput::Constant)).unwrap()
 }

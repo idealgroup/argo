@@ -5,7 +5,7 @@
 //! MAC of the group element.
 
 use ark_ff::AdditiveGroup;
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     mac::{
@@ -30,7 +30,7 @@ where
     type Key = DigitMacKey<G>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> G::Scalar {
+    fn random_input(rng: &mut impl CryptoRngCore) -> G::Scalar {
         use ark_std::UniformRand;
         G::Scalar::rand(rng)
     }
@@ -74,7 +74,7 @@ where
 {
     type Phi = G;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &Self::Phi) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &Self::Phi) -> Self {
         let mut keys = Vec::with_capacity(G::Scalar::NUM_BITS);
         for _ in 0..G::Scalar::NUM_BITS {
             keys.push(<GroupMacKey<G> as RandomFromPhi<bool, _>>::random_from_phi(
@@ -111,7 +111,7 @@ where
         .unwrap()
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let phi = <Self as RandomFromPhi<_, _>>::Phi::random(rng);
         Self::random_from_phi(rng, &phi)
     }

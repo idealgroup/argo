@@ -8,8 +8,8 @@ use ark_ff::{AdditiveGroup, Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 #[cfg(test)]
 use ark_std::UniformRand;
-use ark_std::rand::rngs::StdRng;
 use num_bigint::BigInt;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::groth16_verifier::{KAPPA_A, KAPPA_B},
@@ -41,7 +41,7 @@ impl Mac<Input> for InputMac {
     type Key = InputMacKey;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Input {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Input {
         use ark_bn254::{G1Affine, G2Affine};
 
         (G1Affine::rand(rng), G2Affine::rand(rng))
@@ -58,7 +58,7 @@ impl MacKey<Input, InputMac> for InputMacKey {
         (self.0.decode(&mac.0), self.1.decode(&mac.1))
     }
 
-    fn random_key(_rng: &mut StdRng) -> Self {
+    fn random_key(_rng: &mut impl CryptoRngCore) -> Self {
         unimplemented!()
     }
 }
@@ -218,7 +218,7 @@ fn test_generator() {
 #[test]
 fn test_pairing_circuit() {
     use crate::garble::keys::{a_ec_mac_key, b_mac_key};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     for seed in 0..100 {
         let mut rng = StdRng::seed_from_u64(seed);

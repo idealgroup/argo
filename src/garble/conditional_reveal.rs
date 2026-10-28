@@ -123,13 +123,11 @@ impl<const KAPPA: usize> Table<KAPPA> {
 
             // c^{p^(2phi + 6)} = c^{-p^(2phi)}
             // This has the effect of multiplying the MAC'd value by c
-            // This panics if `c` = Fq12::ZERO, since `c` must be in the
-            // Fq12 multiplicative subgroup.
             let c_term = phi.endo(
                 verifier_key
                     .c
                     .inverse()
-                    .expect("verifier_key.c must be in the Fq12 multiplicative subgroup."),
+                    .ok_or(GarbleError::DegenerateVerifierKey)?,
             );
             let k = k * AB.k * c_term;
 
@@ -171,11 +169,13 @@ impl<const KAPPA: usize> Table<KAPPA> {
     ///
     /// If none of the InputMac's matches the one_mac at a given `i`, we can
     /// recover phi_i using one of the InputMac's.
+    ///
+    /// Returns `None` when the input is one, so nothing is revealed.
     pub(crate) fn evaluate(
         &self,
         input: &Input,
         input_macs: &[InputMac<KAPPA>],
-    ) -> Result<Output, EvalError> {
+    ) -> Result<Option<Output>, EvalError> {
         let phis = EndoScalar::<G2Config>::iter();
         let input_exp = if *input == Fq12::ONE {
             vec![Fq12::ONE]
@@ -234,12 +234,12 @@ impl<const KAPPA: usize> Table<KAPPA> {
         };
 
         if *input == Fq12::ONE && phis.iter().all(|phi| matches!(phi, EndoScalar::Zero(_))) {
-            return Ok(Fq::ZERO);
+            return Ok(None);
         }
 
         // Recover the secret using the phis.
         let secret = self.enc_s - Self::hash_packed_phis(phis);
-        Ok(secret)
+        Ok(Some(secret))
     }
 }
 
@@ -267,7 +267,7 @@ fn test_conditional_reveal_valid() {
 
     let output = table.evaluate(&input, &[input_mac]).unwrap();
 
-    assert_eq!(output, Fq::ZERO);
+    assert_eq!(output, None);
 }
 
 #[test]
@@ -294,7 +294,7 @@ fn test_conditional_reveal_invalid() {
 
     let output = table.evaluate(&input, &[input_mac]).unwrap();
 
-    assert_eq!(output, secret);
+    assert_eq!(output, Some(secret));
 }
 
 #[test]
