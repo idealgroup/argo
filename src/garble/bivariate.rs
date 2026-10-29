@@ -6,7 +6,7 @@ use ark_ec::{
     AffineRepr,
     short_weierstrass::{Affine, SWCurveConfig},
 };
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand_core::CryptoRngCore;
 
@@ -193,11 +193,12 @@ where
     C: AffineRepr,
     C::BaseField: Field,
 {
-    /// # Panics
-    ///
-    /// Panics if `value` is the point at infinity.
+    /// The identity has no affine coordinates and becomes (0, 0), which is on
+    /// neither BN254 G1 nor its twist, so evaluation reveals the secret for it.
     fn from(value: C) -> Self {
-        let (x, y) = value.xy().unwrap();
+        let (x, y) = value
+            .xy()
+            .unwrap_or((C::BaseField::ZERO, C::BaseField::ZERO));
         Self { x, y }
     }
 }

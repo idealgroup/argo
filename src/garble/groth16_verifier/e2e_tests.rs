@@ -444,6 +444,9 @@ fn malformed_proofs_reveal_secret() {
             },
         ),
         ("C = (0, 0)", Input { C: zero, ..f.proof }),
+        ("A = identity", with_a(&f.proof, G1Affine::identity())),
+        ("B = identity", with_b(&f.proof, G2Affine::identity())),
+        ("C = identity", with_c(&f.proof, G1Affine::identity())),
         (
             "B outside G2",
             with_b(&f.proof, off_subgroup_twist_point(&mut rng)),
