@@ -573,6 +573,49 @@ impl ConstraintSynthesizer<Fr> for Idempotent {
     }
 }
 
+/// Knowledge of a with x_i = (i + 1) a for each of the K public inputs, so
+/// for a != 0 the inputs differ and swapping two changes the statement.
+#[derive(Clone)]
+struct Multiples<const K: usize> {
+    a: Option<Fr>,
+}
+
+impl<const K: usize> ConstraintSynthesizer<Fr> for Multiples<K> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let a = self.a.ok_or(SynthesisError::AssignmentMissing);
+        let a_var = cs.new_witness_variable(|| a)?;
+        for i in 1..=K {
+            let k = Fr::from(i as u64);
+            let x = cs.new_input_variable(|| Ok(a? * k))?;
+            cs.enforce_r1cs_constraint(
+                || lc!() + (k, a_var),
+                || lc!() + Variable::One,
+                || lc!() + x,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+type ProofWithInputs<const K: usize> = (Proof<Bn254>, [Fr; K]);
+
+/// A `Multiples<K>` verifying key, and a proof with its public inputs for each a.
+fn multiples<const K: usize, const P: usize>(
+    rng: &mut StdRng,
+    a: [u64; P],
+) -> (ark_groth16::VerifyingKey<Bn254>, [ProofWithInputs<K>; P]) {
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(Multiples::<K> { a: None }, rng).unwrap();
+    let proofs = a.map(|a| {
+        let a = Fr::from(a);
+        let proof = Groth16::<Bn254>::prove(&pk, Multiples::<K> { a: Some(a) }, rng).unwrap();
+        let inputs = std::array::from_fn(|i| a * Fr::from(i as u64 + 1));
+        assert!(Groth16::<Bn254>::verify(&vk, &inputs, &proof).unwrap());
+        (proof, inputs)
+    });
+    (vk, proofs)
+}
+
 fn mul_add_setup(
     rng: &mut StdRng,
 ) -> (
@@ -722,6 +765,125 @@ fn constant_and_garbled_inputs() {
         ..proof
     };
     assert_eq!(evaluate(&wrong_x2), Some(garbling.secret));
+}
+
+/// Three garbled inputs, each with its own labels and x_G table.
+#[test]
+fn several_garbled_inputs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (vk, [(proof, x), (zero_proof, zero_x), (other_proof, other_x)]) =
+        multiples::<3, 3>(&mut rng, [5, 0, 6]);
+    let verifier_key = VerifierKey::<3>::from_groth16(&vk, &[PublicInput::Garbled; 3]).unwrap();
+    let proof = proof_input(&proof, x);
+    let zero_proof = proof_input(&zero_proof, zero_x);
+    assert_eq!(verifier_key.pairing(&proof).unwrap(), Fq12::ONE);
+    let garbling = garble_with(SEED, &verifier_key);
+    let keys = garbler_keys::<3>(SEED);
+    assert_replayed_keys(&garbling, &keys, &proof);
+
+    let evaluate = |input| evaluate_garbling(&verifier_key, &garbling, input).unwrap();
+    assert_eq!(evaluate(&proof), None);
+    assert_eq!(evaluate(&zero_proof), None);
+    assert_eq!(evaluate(&proof_input(&other_proof, other_x)), None);
+
+    let with_x = |x| Input { x, ..proof };
+    let mut cases = vec![
+        ("x0 and x2 swapped", with_x([x[2], x[1], x[0]])),
+        ("inputs of another proof", with_x(other_x)),
+        ("A doubling", with_a(&proof, doubling_input(&keys.a))),
+        ("B cancellation", with_b(&proof, -doubling_input(&keys.b))),
+        ("C doubling", with_c(&proof, doubling_input(&keys.c))),
+    ];
+    for (i, name) in ["x0 + 1", "x1 + 1", "x2 + 1"].into_iter().enumerate() {
+        let mut wrong = x;
+        wrong[i] += Fr::ONE;
+        cases.push((name, with_x(wrong)));
+    }
+    assert_reveals(&verifier_key, &garbling, cases);
+
+    // x_i = r encodes the zero proof's own input, so the pairing accepts it.
+    let zero_bits = InputBits::from(&zero_proof);
+    for i in 0..3 {
+        let bits = with_component(&zero_bits, POINT_COMPONENTS + i, Fr::MODULUS);
+        let output = evaluate_raw(
+            &verifier_key,
+            &garbling.table,
+            &garbling.input_mac_key,
+            &bits,
+        );
+        assert_eq!(output.unwrap(), Some(garbling.secret), "x{i} = r");
+    }
+}
+
+/// Garbled inputs keep their order among constant ones, and the constants are
+/// bound into the garbling.
+#[test]
+fn garbled_inputs_between_constants() {
+    use PublicInput::{Constant, Garbled};
+
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (vk, [(proof, x), (other_proof, other_x)]) = multiples::<5, 2>(&mut rng, [5, 6]);
+    let inputs = [
+        Constant(x[0]),
+        Garbled,
+        Constant(x[2]),
+        Constant(x[3]),
+        Garbled,
+    ];
+    let verifier_key = VerifierKey::<2>::from_groth16(&vk, &inputs).unwrap();
+    let proof = proof_input(&proof, [x[1], x[4]]);
+    assert_eq!(verifier_key.pairing(&proof).unwrap(), Fq12::ONE);
+    let garbling = garble_with(SEED, &verifier_key);
+
+    assert_eq!(
+        evaluate_garbling(&verifier_key, &garbling, &proof).unwrap(),
+        None
+    );
+    let with_x = |x| Input { x, ..proof };
+    assert_reveals(
+        &verifier_key,
+        &garbling,
+        vec![
+            ("garbled inputs swapped", with_x([x[4], x[1]])),
+            ("x1 + 1", with_x([x[1] + Fr::ONE, x[4]])),
+            ("x4 + 1", with_x([x[1], x[4] + Fr::ONE])),
+            (
+                "valid proof for other constants",
+                proof_input(&other_proof, [other_x[1], other_x[4]]),
+            ),
+        ],
+    );
+}
+
+/// Every input fixed at garbling time: changing or reordering any constant
+/// makes the valid proof reveal the secret.
+#[test]
+fn many_constant_inputs() {
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (vk, [(proof, x)]) = multiples::<5, 1>(&mut rng, [5]);
+    let proof = proof_input(&proof, []);
+    let garble_for = |x: [Fr; 5], seed| {
+        let verifier_key =
+            VerifierKey::<0>::from_groth16(&vk, &x.map(PublicInput::Constant)).unwrap();
+        let garbling = garble_with(seed, &verifier_key);
+        evaluate_garbling(&verifier_key, &garbling, &proof)
+            .unwrap()
+            .map(|output| output == garbling.secret)
+    };
+    assert_eq!(garble_for(x, SEED), None);
+
+    let mut wrong = vec![("x0 and x4 swapped", [x[4], x[1], x[2], x[3], x[0]])];
+    for (i, name) in ["x0 + 1", "x1 + 1", "x2 + 1", "x3 + 1", "x4 + 1"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut constants = x;
+        constants[i] += Fr::ONE;
+        wrong.push((name, constants));
+    }
+    for (seed, (name, constants)) in (SEED + 1..).zip(wrong) {
+        assert_eq!(garble_for(constants, seed), Some(true), "{name}");
+    }
 }
 
 #[test]
