@@ -35,8 +35,8 @@ fn golden_instance_hashes() {
     assert_eq!(
         hashes,
         [
-            "c10aefe9bc1b75dbcba4aba93af99c3cab4ab4c50d0d0aa2626ce6c016dc2b18",
-            "49810b3fb7577cd584cc965ecc2facf252dfb84c0fa9e2c773bee0dc57a20363",
+            "b9c5cd4e0ca79da9a5d6d6e49eeb553021d06a424d05ff40b1ecf1b6d4830eab",
+            "0848afc311b88dc89a9d1311780772c374812a74e9ffd3412c1728d872a2bf63",
         ]
     );
 }
@@ -47,8 +47,8 @@ fn golden_instance_hashes_without_garbled_inputs() {
     assert_eq!(
         hashes,
         [
-            "cad6f7719a06fa08bf0805f5c2fe07e01bb267127a969cb82f1f0ced27d259b3",
-            "b63461a4a1684e2539977092780c8961b9b213b4d2be72d96c31580dda531811",
+            "c171e627cb9f81bb90f8ef926b232c8b0a02cdc49eb8db23d70d2778342abb3b",
+            "6fae3f82e1132eb7ea80d11ec72cfee285219f5fcc6b8b4bc8c761248a7aeb08",
         ]
     );
 }

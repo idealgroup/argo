@@ -22,6 +22,15 @@ use crate::{
     },
 };
 
+/// The AES key of a pad: `dst` itself. `dst` already mixes the nonce into the
+/// gid, so mixing it in again would cancel it and key every pad of a table by
+/// the public gid alone.
+fn pad_key(dst: &[u8]) -> [u8; AES_BLOCK_SIZE] {
+    let mut key = [0; AES_BLOCK_SIZE];
+    key.iter_mut().zip(dst).for_each(|(key, dst)| *key = *dst);
+    key
+}
+
 impl<Mac1, Mac2> Encrypt<AesMiTCCR, Mac1> for Mac2
 where
     Mac1: Clone + Into<Bit16ByteMac> + From<Bit16ByteMac>,
@@ -32,19 +41,13 @@ where
     fn encrypt(
         &self,
         dst: Option<&[u8]>,
-        parent_nonce: &mut Nonce,
+        _parent_nonce: &mut Nonce,
         message: &Mac1,
     ) -> Result<Self::Ciphertext, GarbleError> {
-        let dst = dst.ok_or(GarbleError::MissingDST)?;
+        let key = pad_key(dst.ok_or(GarbleError::MissingDST)?);
 
         let input_mac: Bit16ByteMac = self.clone().into();
         let output_mac: Bit16ByteMac = message.clone().into();
-
-        let mut key = [0; 16];
-        key.iter_mut()
-            .zip(dst.iter())
-            .zip(parent_nonce.bytes().iter())
-            .for_each(|((key, dst), nonce)| *key = dst ^ nonce);
 
         let mut ciphertext = [0; 16];
         let pad = AesMiTCCR::hash(&key, &input_mac);
@@ -61,17 +64,11 @@ where
     fn decrypt(
         &self,
         dst: Option<&[u8]>,
-        parent_nonce: &mut Nonce,
+        _parent_nonce: &mut Nonce,
         ciphertext: &Self::Ciphertext,
     ) -> Result<Mac1, EvalError> {
-        let dst = dst.ok_or(EvalError::MissingDST)?;
+        let key = pad_key(dst.ok_or(EvalError::MissingDST)?);
         let input_mac: Bit16ByteMac = self.clone().into();
-
-        let mut key = [0; 16];
-        key.iter_mut()
-            .zip(dst.iter())
-            .zip(parent_nonce.bytes().iter())
-            .for_each(|((key, dst), nonce)| *key = dst ^ nonce);
 
         let mut plaintext = [0; 16];
         let pad = AesMiTCCR::hash(&key, &input_mac);
@@ -262,4 +259,37 @@ fn test_aes_mitccr_bytes_to_bytes_adaptor() {
 
         assert!(output_mac == evaluated_output_mac);
     }
+}
+
+/// The true label's pad is keyed by the adaptor's `dst`, like the false
+/// label's, so adaptors of one table do not share a pad key.
+#[test]
+fn true_label_pad_is_keyed_by_dst() {
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
+
+    use crate::{mac::Random, utils::aes_hash::aes_mitccr::clear_set as aes_mitccr_clear_set};
+
+    let mut rng = StdRng::seed_from_u64(0);
+    let input_mac_key = Bit16ByteMacKey::random_key(&mut rng);
+    let gid = GID::random(&mut rng);
+    let phi = <[u8; 16]>::random(&mut rng);
+    let mut nonce = Nonce::new().fork().unwrap();
+    let dst = Table::derive_dst(&gid, &nonce);
+    assert_ne!(dst, gid);
+
+    let (table, output_mac_key) = Table::<AesMiTCCR, Bit16ByteMac, Bit16ByteMac>::garble(
+        &mut nonce,
+        &mut rng,
+        Some(Aux { gid, phi }),
+        &input_mac_key,
+    )
+    .unwrap();
+    aes_mitccr_clear_set();
+    super::super::clear_set();
+
+    let pad = AesMiTCCR::hash(&dst, &input_mac_key.encode(&true));
+    aes_mitccr_clear_set();
+    let true_label = output_mac_key.encode(&true);
+    let expected: [u8; 16] = std::array::from_fn(|i| pad[i] ^ true_label[i]);
+    assert_eq!(table.ciphertext, expected);
 }
