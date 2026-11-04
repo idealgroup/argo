@@ -49,8 +49,10 @@ impl<G> Default for EndoScalar<G> {
 }
 
 impl<G: GLVConfig> Random for EndoScalar<G> {
+    /// Draws a `u64`: a `usize` draw takes a `u32` on 32-bit targets, which
+    /// would garble a different instance there from the same seed.
     fn random(rng: &mut impl CryptoRngCore) -> EndoScalar<G> {
-        let exp = rng.gen_range(0..ENDO_SIZE);
+        let exp = rng.gen_range(0..ENDO_SIZE as u64);
         Self::from_u8(exp as u8)
     }
 }
@@ -606,5 +608,18 @@ fn test_checksum_single_erasure() {
                 "digit {digit}, erased {missing}"
             );
         }
+    }
+}
+
+/// Each draw takes whole `u64`s from the RNG on every target, so a seed
+/// garbles the same instance on 32-bit and 64-bit platforms.
+#[test]
+fn endoscalar_draws_take_u64s() {
+    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+
+    let mut rng = ChaCha20Rng::from_seed([0; 32]);
+    for draw in 0..100 {
+        EndoScalar::<g1::Config>::random(&mut rng);
+        assert!(rng.get_word_pos() % 2 == 0, "draw {draw}");
     }
 }
