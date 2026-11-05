@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["groth16"]
+# `VerifierKey::from_groth16`. ark-groth16 depends on merlin, which refuses
+# to build for big-endian targets.
 groth16 = ["dep:ark-groth16"]
 
 [dependencies]

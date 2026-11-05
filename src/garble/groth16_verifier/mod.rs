@@ -60,7 +60,7 @@ use crate::{
     },
 };
 
-#[cfg(feature = "groth16")]
+#[cfg(any(test, feature = "groth16"))]
 use crate::utils::error::VerifierKeyError;
 #[cfg(test)]
 use crate::{
@@ -103,7 +103,7 @@ pub enum PublicInput {
 impl<const N: usize> VerifierKey<N> {
     /// Builds the key from a Groth16 verifying key. `inputs` gives every public
     /// input in order; exactly `N` of them must be [`PublicInput::Garbled`].
-    #[cfg(feature = "groth16")]
+    #[cfg(any(test, feature = "groth16"))]
     pub fn from_groth16(
         vk: &ark_groth16::VerifyingKey<Bn254>,
         inputs: &[PublicInput],
