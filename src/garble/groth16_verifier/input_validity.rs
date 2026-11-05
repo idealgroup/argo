@@ -19,25 +19,26 @@ use crate::{
     utils::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
+        serde::Array,
     },
 };
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct Table<const N: usize> {
     // Checks that each garbled `x_l` is a valid Fr element
-    x_range_check: [less_than::Table<Fr>; N],
+    x_range_check: Array<less_than::Table<Fr>, N>,
     // Checks that `A.x`, `A.y` are valid Fq elements
-    a_range_check: [less_than::Table<Fq>; 2],
+    a_range_check: Array<less_than::Table<Fq>, 2>,
     // Checks that A is a valid G1 curve point, leaking `secret` if not
     a_curve_check: bivariate::Table<<g1::Config as CurveConfig>::BaseField>,
     // Checks that `B.x`, `B.y` are valid Fq2 elements
-    b_range_check: [less_than::Table<Fq>; 4],
+    b_range_check: Array<less_than::Table<Fq>, 4>,
     // Checks that B is a valid curve point, leaking `secret` if not
     b_curve_check: bivariate::Table<<g2::Config as CurveConfig>::BaseField>,
     // Checks that B is in G2, leaking `secret` if not
     b_g2_check: g2_subgroup_check::Table,
     // Checks that `C.x`, `C.y` are valid Fq elements
-    c_range_check: [less_than::Table<Fq>; 2],
+    c_range_check: Array<less_than::Table<Fq>, 2>,
     // Checks that C is a valid G1 curve point, leaking `secret` if not
     c_curve_check: bivariate::Table<<g1::Config as CurveConfig>::BaseField>,
     // Global ID of this instance
@@ -65,8 +66,8 @@ impl<const N: usize> Table<N> {
             && self
                 .a_range_check
                 .iter()
-                .chain(&self.b_range_check)
-                .chain(&self.c_range_check)
+                .chain(self.b_range_check.iter())
+                .chain(self.c_range_check.iter())
                 .all(|t| t.has_garbled_shape(gid))
             && self.a_curve_check.has_garbled_shape(&CURVE_MONOMIALS)
             && self.b_curve_check.has_garbled_shape(&CURVE_MONOMIALS)
@@ -207,13 +208,13 @@ impl<const N: usize> Table<N> {
         let x_range_check = x_range_check.try_into().unwrap_or_else(|_| panic!());
 
         let table = Self {
-            x_range_check,
-            a_range_check,
+            x_range_check: Array(x_range_check),
+            a_range_check: Array(a_range_check),
             a_curve_check,
-            b_range_check,
+            b_range_check: Array(b_range_check),
             b_curve_check,
             b_g2_check,
-            c_range_check,
+            c_range_check: Array(c_range_check),
             c_curve_check,
             gid: *gid,
         };
@@ -265,7 +266,7 @@ impl<const N: usize> Table<N> {
         // Checks that A.x, A.y are valid Fq elements, returning the `secret`
         // otherwise.
         let A = {
-            let [x_table, y_table] = &self.a_range_check;
+            let [x_table, y_table] = &self.a_range_check.0;
             bivariate::Input {
                 x: or_reveal!(range_check(
                     x_table,
@@ -340,7 +341,7 @@ impl<const N: usize> Table<N> {
         // Checks that C.x, C.y are valid Fq elements, returning the `secret`
         // otherwise.
         let C = {
-            let [x_table, y_table] = &self.c_range_check;
+            let [x_table, y_table] = &self.c_range_check.0;
             bivariate::Input {
                 x: or_reveal!(range_check(
                     x_table,

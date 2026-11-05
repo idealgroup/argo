@@ -54,6 +54,7 @@ use crate::{
         constants::R_MUL_COFACTOR_GENERATOR,
         error::{EvalError, GarbleError, InputError},
         group::checked_multi_pairing,
+        serde::Array,
     },
 };
 
@@ -418,7 +419,7 @@ pub struct Table<const N: usize = 1> {
     // Check that the input is well-formed
     input_validity: input_validity::Table<N>,
     // [x_l]G1_l for each garbled public input
-    x_G: [scalar_mul::fixed::Table<g1::Config, KAPPA_B>; N],
+    x_G: Array<scalar_mul::fixed::Table<g1::Config, KAPPA_B>, N>,
     // Maps input MAC of (A.x, A.y) to iterated MAC of A projective coordinates
     a_ec_mac: field_mac_to_ec_mac::Table<g1::Config, KAPPA_A>,
     // Maps input MAC of (B.x, B.y) to iterated MAC of B projective coordinates
@@ -569,7 +570,7 @@ impl<const N: usize> Table<N> {
 
         Ok(Self {
             input_validity,
-            x_G,
+            x_G: Array(x_G),
             a_ec_mac,
             b_ec_mac,
             c_ec_mac,
