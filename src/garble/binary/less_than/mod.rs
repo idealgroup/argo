@@ -33,7 +33,7 @@ use crate::{
     garble::{Circuit, bit_adaptor, groth16_verifier::GID},
     mac::{
         IdentityMac, IdentityMacKey, MacKey, Random, RandomFromPhi,
-        bit::bytes::{Bit16ByteMac, Bit16ByteMacKey},
+        bit::bytes::{Bit16ByteMac, Bit16ByteMacKey, random_offset},
         digit::bytes::{DigitMac, DigitMacKey},
     },
     utils::{
@@ -76,8 +76,7 @@ where
         let (secret, gid) = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
 
-        let mut phi = [0; 16];
-        rng.fill_bytes(&mut phi);
+        let phi = random_offset(rng);
 
         let zero_mac_key = Bit16ByteMacKey::random_from_phi(rng, &phi);
         let one_mac_key = Bit16ByteMacKey::random_from_phi(rng, &phi);

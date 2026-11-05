@@ -27,6 +27,17 @@ impl std::fmt::Debug for Bit16ByteMacKey {
     }
 }
 
+/// Samples `phi`, the XOR of a bit's two labels, which must not be zero.
+pub(crate) fn random_offset(rng: &mut impl CryptoRngCore) -> [u8; 16] {
+    loop {
+        let mut phi = [0; 16];
+        rng.fill_bytes(&mut phi);
+        if phi != [0; 16] {
+            return phi;
+        }
+    }
+}
+
 impl Bit16ByteMacKey {
     pub(crate) fn phi_xor_k(&self) -> [u8; 16] {
         let mut bytes = self.phi;
@@ -59,8 +70,7 @@ impl MacKey<bool, Bit16ByteMac> for Bit16ByteMacKey {
     }
 
     fn random_key(rng: &mut impl CryptoRngCore) -> Self {
-        let mut phi = [0; 16];
-        rng.fill_bytes(&mut phi);
+        let phi = random_offset(rng);
 
         let mut k = [0; 16];
         rng.fill_bytes(&mut k);
@@ -88,4 +98,38 @@ impl RandomFromPhi<bool, Bit16ByteMac> for Bit16ByteMacKey {
 
         Self { phi: *phi, k }
     }
+}
+
+#[test]
+fn random_offset_is_never_zero() {
+    use rand_core::{CryptoRng, RngCore, impls};
+
+    /// Gives sixteen zero bytes, then ones.
+    struct ZeroFirst(usize);
+
+    impl RngCore for ZeroFirst {
+        fn next_u32(&mut self) -> u32 {
+            impls::next_u32_via_fill(self)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            impls::next_u64_via_fill(self)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for byte in dest {
+                *byte = u8::from(self.0 >= 16);
+                self.0 += 1;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for ZeroFirst {}
+
+    assert_eq!(random_offset(&mut ZeroFirst(0)), [1; 16]);
 }

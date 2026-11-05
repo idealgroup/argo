@@ -11,7 +11,7 @@ use crate::{
     mac::{
         Mac, MacKey, RandomFromPhi,
         binary::{self, And, BinaryInput, BinaryInputMac, Xor},
-        bit::bytes::{Bit16ByteMac, Bit16ByteMacKey},
+        bit::bytes::{Bit16ByteMac, Bit16ByteMacKey, random_offset},
     },
     utils::error::{EvalError, GarbleError},
 };
@@ -94,8 +94,7 @@ impl MacKey<Input, InputMac> for InputMacKey {
     }
 
     fn random_key(rng: &mut impl rand_core::CryptoRngCore) -> Self {
-        let mut phi = [0; 16];
-        rng.fill_bytes(&mut phi);
+        let phi = random_offset(rng);
         Self {
             x: Bit16ByteMacKey::random_from_phi(rng, &phi),
             p: Bit16ByteMacKey::random_from_phi(rng, &phi),

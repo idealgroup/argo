@@ -5,7 +5,7 @@ use rand_core::CryptoRngCore;
 
 use crate::mac::{
     Mac, MacKey, RandomFromPhi,
-    bit::bytes::{Bit16ByteMac, Bit16ByteMacKey},
+    bit::bytes::{Bit16ByteMac, Bit16ByteMacKey, random_offset},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -280,8 +280,7 @@ impl<Op: BooleanOp> MacKey<BinaryInput<Op>, BinaryInputMac<Op>> for BinaryInputM
 
     // phi's have to be the same for left and right
     fn random_key(rng: &mut impl CryptoRngCore) -> Self {
-        let mut phi = [0; 16];
-        rng.fill_bytes(&mut phi);
+        let phi = random_offset(rng);
 
         let left = BitMacKey::random_from_phi(rng, &phi);
         let right = BitMacKey::random_from_phi(rng, &phi);
