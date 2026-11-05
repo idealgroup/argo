@@ -11,7 +11,7 @@ groth16 = ["dep:ark-groth16"]
 [dependencies]
 ark-ff = "0.6.0"
 ark-ec = "0.6.0"
-ark-std = { version = "0.6.0", features = [ "getrandom" ]}
+ark-std = "0.6.0"
 ark-bn254 = "0.6.0"
 ark-serialize = "0.6.0"
 rand_core = "0.6.4"
