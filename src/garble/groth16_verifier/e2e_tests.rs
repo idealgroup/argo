@@ -1105,49 +1105,65 @@ fn deserialize(bytes: &[u8]) -> Table {
     Table::deserialize_compressed(bytes).unwrap()
 }
 
-/// Hidden tables come from the garbler unopened, so one that deserializes
-/// but has the wrong shape must be rejected rather than evaluated.
+/// Hidden tables come from the garbler unopened, so one with a vector length
+/// `garble` never gives must fail to decode, and one with any other wrong
+/// shape must be rejected rather than evaluated.
 #[test]
 fn malformed_tables_are_rejected() {
+    #[derive(PartialEq)]
+    enum Rejected {
+        Decoding,
+        Shape,
+    }
+    use Rejected::*;
+
     let f = fixture();
     let bytes = serialize(&f.garbling.table);
     for len in [0, 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(Table::<1>::deserialize_compressed(&bytes[..len]).is_err());
     }
 
-    type Mutation = (&'static str, fn(&mut Table));
-    let mutations: [Mutation; 8] = [
-        ("C converter replica dropped", |t| {
+    type Mutation = (&'static str, Rejected, fn(&mut Table));
+    let mutations: [Mutation; 9] = [
+        ("C converter replica dropped", Decoding, |t| {
             t.c_ec_mac.x.pop();
         }),
-        ("Y tables on a compact converter", |t| {
-            t.b_ec_mac.y = Some(Vec::new())
+        ("Y tables on a compact converter", Decoding, |t| {
+            t.b_ec_mac.y = Some(Vec::new().into())
         }),
-        ("doubling ciphertext dropped", |t| {
+        ("doubling ciphertext dropped", Decoding, |t| {
             t.a_ec_mac.doubling.pop();
         }),
-        ("polynomial term dropped", |t| {
+        ("polynomial term dropped", Shape, |t| {
             t.c_ec_mac.z[0].tables.pop();
         }),
-        ("monomial changed", |t| {
+        ("sixth polynomial term", Decoding, |t| {
+            let term = t.a_ec_mac.x[0].tables.pop().unwrap();
+            t.a_ec_mac.y.as_mut().unwrap()[0].tables.push(term);
+        }),
+        ("monomial changed", Shape, |t| {
             t.a_ec_mac.x[0].tables[0].1 = Monomial::new(200, 200)
         }),
-        ("scalar bit adaptor dropped", |t| {
+        ("scalar bit adaptor dropped", Decoding, |t| {
             t.x_G[0].adaptors.pop();
         }),
-        ("bit adaptor ciphertext truncated", |t| {
+        ("bit adaptor ciphertext truncated", Decoding, |t| {
             t.x_G[0].adaptors[0].ciphertext.pop();
         }),
-        ("gid changed", |t| t.gid[0] ^= 1),
+        ("gid changed", Shape, |t| t.gid[0] ^= 1),
     ];
-    for (name, mutate) in mutations {
+    for (name, rejected, mutate) in mutations {
         let mut table = deserialize(&bytes);
         mutate(&mut table);
-        let mutated = serialize(&table);
-        let Ok(table) = Table::<1>::deserialize_compressed(&mutated[..]) else {
-            assert!(mutated.len() > bytes.len(), "{name}");
+        let decoded = Table::<1>::deserialize_compressed(&serialize(&table)[..]);
+        if rejected == Decoding {
+            assert!(
+                matches!(decoded, Err(SerializationError::InvalidData)),
+                "{name}"
+            );
             continue;
-        };
+        }
+        let table = decoded.expect(name);
         assert!(!table.has_garbled_shape(), "{name}");
         let output = evaluate_table(&f.verifier_key, &table, &f.garbling.input_mac_key, &f.proof);
         assert!(
@@ -1157,10 +1173,9 @@ fn malformed_tables_are_rejected() {
     }
 }
 
-/// The garbler writes the vector lengths too. A first range check claiming
-/// 1000 extra adaptors, and holding them, is a valid less_than table on its
-/// own, but the whole table must stop decoding at the garbled size instead
-/// of reading every element it claims.
+/// The garbler writes the vector lengths too, so a first range check claiming
+/// 1000 extra adaptors, and holding them, must fail at its length instead of
+/// decoding every element it claims.
 #[test]
 fn inflated_vector_length_fails_to_deserialize() {
     use crate::garble::binary::less_than;
@@ -1179,9 +1194,32 @@ fn inflated_vector_length_fails_to_deserialize() {
     }
     inflated.extend(&bytes[40..]);
 
-    let range_check = less_than::Table::<Fr>::deserialize_compressed(&inflated[..]).unwrap();
-    assert!(!range_check.has_garbled_shape(&f.garbling.table.gid));
-    assert!(Table::<1>::deserialize_compressed(&inflated[..]).is_err());
+    for error in [
+        less_than::Table::<Fr>::deserialize_compressed(&inflated[..]).err(),
+        Table::<1>::deserialize_compressed(&inflated[..]).err(),
+    ] {
+        assert!(
+            matches!(error, Some(SerializationError::InvalidData)),
+            "{error:?}"
+        );
+    }
+}
+
+/// Every vector length can be one `garble` gives while the table still holds
+/// more than `garble` gives, here Y tables on a compact converter, so decoding
+/// also stops at the garbled size.
+#[test]
+fn table_beyond_the_garbled_size_fails_to_deserialize() {
+    let f = fixture();
+    let bytes = serialize(&f.garbling.table);
+    let mut table = deserialize(&bytes);
+    table.c_ec_mac.y = Some(deserialize(&bytes).c_ec_mac.x);
+    let mutated = serialize(&table);
+    assert!(mutated.len() > Table::<1>::garbled_size(Compress::Yes));
+    assert!(matches!(
+        Table::<1>::deserialize_compressed(&mutated[..]),
+        Err(SerializationError::IoError(_))
+    ));
 }
 
 /// Tables of the right shape can still disagree with each other. The compact
@@ -1194,7 +1232,7 @@ fn inconsistent_converters_do_not_panic() {
         |table| evaluate_table(&f.verifier_key, table, &f.garbling.input_mac_key, &f.proof);
 
     let mut table = deserialize(&bytes);
-    for x in &mut table.b_ec_mac.x {
+    for x in table.b_ec_mac.x.iter_mut() {
         x.constant += Fq2::ONE;
     }
     assert!(table.has_garbled_shape());
@@ -1205,7 +1243,7 @@ fn inconsistent_converters_do_not_panic() {
     );
 
     let mut table = deserialize(&bytes);
-    for x in &mut table.c_ec_mac.x {
+    for x in table.c_ec_mac.x.iter_mut() {
         x.constant += Fq::ONE;
     }
     let output = evaluate(&table);

@@ -1,4 +1,4 @@
-use std::any::type_name;
+use std::{any::type_name, marker::PhantomData};
 
 use aes::{Block, cipher::BlockEncrypt};
 use ark_ff::{BigInteger, Field, PrimeField};
@@ -21,8 +21,18 @@ use crate::{
         aes_hash::{AES_BLOCK_SIZE, aes_ctr::AesCtr},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{BoundedVec, LenBound},
     },
 };
+
+/// The length of a ciphertext that encrypts one `G`.
+pub(crate) struct OneElement<G>(PhantomData<G>);
+
+impl<G: Field> LenBound for OneElement<G> {
+    fn allows(len: u64) -> bool {
+        len == (AesCtr::num_blocks::<G>() * AES_BLOCK_SIZE) as u64
+    }
+}
 
 /// Given an input_mac_key: Bit16ByteMacKey and a group element phi: G,
 /// derive an output_mac_key: GroupMacKey with s.t.
@@ -140,7 +150,7 @@ where
     G: Field,
     G::BasePrimeField: FromLeBytesModOrder,
 {
-    type Ciphertext = Vec<u8>;
+    type Ciphertext = BoundedVec<u8, OneElement<G>>;
 
     /// Encrypts a BitGroupMac(G) using a Bit16ByteMac([u8; 16]) as the key.
     /// Produces a ciphertext Vec<u8> of the same length as the number of
@@ -186,7 +196,7 @@ where
             }
         }
 
-        Ok(ciphertext)
+        Ok(ciphertext.into())
     }
 
     fn decrypt(
@@ -311,6 +321,7 @@ fn keystream_depends_on_table_gid() {
             &zero,
         )
         .unwrap()
+        .0
     };
     assert_ne!(keystream([2; 16]), keystream([3; 16]));
 }

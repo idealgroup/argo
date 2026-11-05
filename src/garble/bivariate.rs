@@ -17,6 +17,7 @@ use crate::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{AtMost, BoundedVec},
     },
 };
 
@@ -24,6 +25,10 @@ use crate::{
 use crate::{garble::Nonce, utils::aes_hash::aes_ctr::clear_set};
 #[cfg(test)]
 use ark_std::rand::{SeedableRng, rngs::StdRng};
+
+/// The most digit adaptor tables `garble` gives a polynomial Argo uses: five,
+/// for the curve equations and the y coordinate.
+const MAX_TABLES: usize = 5;
 
 /// Powers of a monomial where (i, j) represents x^i y^j.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, CanonicalDeserialize, CanonicalSerialize)]
@@ -274,7 +279,7 @@ where
     F::BasePrimeField: FromLeBytesModOrder,
 {
     pub(crate) constant: F,
-    pub(crate) tables: Vec<(XY, Monomial, digit_adaptor::Table<F>)>,
+    pub(crate) tables: BoundedVec<(XY, Monomial, digit_adaptor::Table<F>), AtMost<MAX_TABLES>>,
 }
 
 impl<F> Table<F>
@@ -346,7 +351,13 @@ where
             tables.push((xy, monomial, table));
         }
 
-        Ok((Self { constant, tables }, IdentityMacKey))
+        Ok((
+            Self {
+                constant,
+                tables: tables.into(),
+            },
+            IdentityMacKey,
+        ))
     }
 
     fn evaluate(

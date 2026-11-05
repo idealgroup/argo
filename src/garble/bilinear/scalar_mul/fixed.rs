@@ -25,6 +25,7 @@ use crate::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{Bits, BoundedVec},
     },
 };
 
@@ -38,16 +39,18 @@ pub(crate) type OutputMac<C, const KAPPA: usize> =
 // { \phi_i, b • c_i }
 pub(crate) type OutputMacKey<C, const KAPPA: usize> = [EndoMacKey<C, Affine<C>>; KAPPA];
 
+type BitAdaptors<F> = BoundedVec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<F>>, Bits<F>>;
+
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub(crate) struct Table<C: GLVConfig, const KAPPA: usize>
 where
     C: GLVConfig,
-    C::ScalarField: Random,
+    C::ScalarField: Random + NumBits,
     <C::ScalarField as Field>::BasePrimeField: FromLeBytesModOrder,
 {
     /// Converts input bit MACs into a DigitMAC, where each bit is MAC'd under
     /// the same `phi`.
-    pub(crate) adaptors: Vec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<C::ScalarField>>>,
+    pub(crate) adaptors: BitAdaptors<C::ScalarField>,
     /// The fixed base `P`.
     pub(crate) point: Affine<C>,
     /// S_i = [\phi_i]P + [a • c_i]P
@@ -179,7 +182,7 @@ where
 
         Ok((
             Self {
-                adaptors,
+                adaptors: adaptors.into(),
                 point,
                 s: ddh_mac,
                 bilinear_table,

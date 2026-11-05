@@ -11,7 +11,7 @@ use std::any::type_name;
 use crate::garble::groth16_verifier::{KAPPA_A, KAPPA_B};
 
 use ark_bn254::Fq;
-use ark_ec::{AffineRepr, scalar_mul::glv::GLVConfig, short_weierstrass::Affine};
+use ark_ec::{AffineRepr, CurveConfig, scalar_mul::glv::GLVConfig, short_weierstrass::Affine};
 use ark_ff::{Field, batch_inversion};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand_core::CryptoRngCore;
@@ -29,6 +29,7 @@ use crate::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{BoundedVec, Len},
     },
 };
 
@@ -45,13 +46,17 @@ where
     <C::BaseField as Field>::BasePrimeField: FromLeBytesModOrder,
 {
     is_full: bool,
-    pub(crate) x: Vec<bivariate::Table<C::BaseField>>,
-    pub(crate) y: Option<Vec<bivariate::Table<C::BaseField>>>,
-    pub(crate) z: Vec<bivariate::Table<C::BaseField>>,
+    pub(crate) x: Replicas<C, KAPPA>,
+    pub(crate) y: Option<Replicas<C, KAPPA>>,
+    pub(crate) z: Replicas<C, KAPPA>,
     // Per replica, the secret encrypted under the input labels of
     // phi^{-1}(K), the one input where the chord formula yields (0, 0, 0).
-    pub(crate) doubling: Vec<[u8; 48]>,
+    pub(crate) doubling: BoundedVec<[u8; 48], Len<KAPPA>>,
 }
+
+/// One coordinate's polynomial table per replica.
+pub(crate) type Replicas<C, const KAPPA: usize> =
+    BoundedVec<bivariate::Table<<C as CurveConfig>::BaseField>, Len<KAPPA>>;
 
 /// Monomials of the polynomials `garble` builds for X, Y and Z, in the order
 /// [1, X, Y, X^2, XY, Y^2] of `Poly::biquadratic`.
@@ -322,10 +327,10 @@ where
         Ok((
             Self {
                 is_full,
-                x,
-                y: if is_full { Some(y) } else { None },
-                z,
-                doubling,
+                x: x.into(),
+                y: if is_full { Some(y.into()) } else { None },
+                z: z.into(),
+                doubling: doubling.into(),
             },
             output_mac_key.clone(),
         ))

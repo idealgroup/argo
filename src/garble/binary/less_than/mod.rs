@@ -40,6 +40,7 @@ use crate::{
         aes_hash::aes_ctr::AesCtr,
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
+        serde::{Bits, BoundedVec},
     },
 };
 
@@ -52,8 +53,8 @@ where
 {
     zero_mac: Bit16ByteMac,
     one_mac: Bit16ByteMac,
-    adaptors: Vec<bit_adaptor::Table<AesCtr, Bit16ByteMac, Bit16ByteMac>>,
-    gates: Vec<gate::Table>,
+    adaptors: BoundedVec<bit_adaptor::Table<AesCtr, Bit16ByteMac, Bit16ByteMac>, Bits<F>>,
+    gates: BoundedVec<gate::Table, Bits<F>>,
     enc_s: Fq,
     gid: GID,
     _marker: PhantomData<F>,
@@ -122,8 +123,8 @@ where
         let table = Self {
             zero_mac: zero_mac_key.encode(&false),
             one_mac: one_mac_key.encode(&true),
-            adaptors: adaptors.0,
-            gates,
+            adaptors: adaptors.0.into(),
+            gates: gates.into(),
             enc_s,
             gid,
             _marker: PhantomData,

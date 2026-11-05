@@ -18,6 +18,7 @@ use crate::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{Bits, BoundedVec},
     },
 };
 use ark_ff::Field;
@@ -25,7 +26,9 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand_core::CryptoRngCore;
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug)]
-pub(crate) struct Table<F>(Vec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<F>>>)
+pub(crate) struct Table<F>(
+    BoundedVec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<F>>, Bits<F>>,
+)
 where
     F: Field + NumBits + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder;
@@ -75,7 +78,7 @@ where
             output_mac_keys.push(output_mac_key);
         }
 
-        Ok((Self(bit_adaptor_tables), output_mac_keys.into()))
+        Ok((Self(bit_adaptor_tables.into()), output_mac_keys.into()))
     }
 
     fn evaluate(
