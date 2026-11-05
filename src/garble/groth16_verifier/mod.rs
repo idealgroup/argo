@@ -621,21 +621,25 @@ impl<const N: usize> Table<N> {
         let Input { A, B, C, x } = input;
         let VerifierKey { H1, H2, .. } = *verifier_key;
 
-        // A point that hits a conversion's doubling case releases the secret.
-        if let Some(secret) = self
-            .a_ec_mac
-            .reveal(&input_mac.A)
-            .or_else(|| self.b_ec_mac.reveal(&input_mac.B))
-            .or_else(|| self.c_ec_mac.reveal(&input_mac.C))
-        {
-            return Ok(Some(secret));
-        }
+        // A, B and C are on their curves here, so a conversion reports
+        // `DoublingInput` only at the doubling input of that replica, and no
+        // other input opens a doubling ciphertext.
 
         // Evaluate the field_to_ec_mac table for `A`.
-        let a_ec_mac = self.a_ec_mac.evaluate(parent_nonce, &A, &input_mac.A)?.1;
+        let a_ec_mac = match self.a_ec_mac.evaluate(parent_nonce, &A, &input_mac.A) {
+            Err(EvalError::DoublingInput(replica)) => {
+                return self.a_ec_mac.reveal(replica, &input_mac.A).map(Some);
+            }
+            result => result?.1,
+        };
 
         // Evaluate the field_to_ec_mac table for `B`.
-        let b_ec_mac = self.b_ec_mac.evaluate(parent_nonce, &B, &input_mac.B)?.1;
+        let b_ec_mac = match self.b_ec_mac.evaluate(parent_nonce, &B, &input_mac.B) {
+            Err(EvalError::DoublingInput(replica)) => {
+                return self.b_ec_mac.reveal(replica, &input_mac.B).map(Some);
+            }
+            result => result?.1,
+        };
 
         if let Some(secret) =
             self.input_validity
@@ -645,7 +649,12 @@ impl<const N: usize> Table<N> {
         }
 
         // Evaluate the field_to_ec_mac table for `C`.
-        let c_ec_mac = self.c_ec_mac.evaluate(parent_nonce, &C, &input_mac.C)?.1;
+        let c_ec_mac = match self.c_ec_mac.evaluate(parent_nonce, &C, &input_mac.C) {
+            Err(EvalError::DoublingInput(replica)) => {
+                return self.c_ec_mac.reveal(replica, &input_mac.C).map(Some);
+            }
+            result => result?.1,
+        };
 
         // Σ_l MAC([x_l]G1_l) for each replica. All x_G tables share the
         // pairing output's phis, so the sum is a MAC of [x] = Σ_l x_l G1_l.

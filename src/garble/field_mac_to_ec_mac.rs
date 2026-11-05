@@ -72,7 +72,7 @@ const Z_MONOMIALS: [Monomial; 2] = [Monomial::constant(), Monomial::new(1, 0)];
 
 /// Hash of the labels of every input bit, which only the evaluator holding
 /// those labels can compute.
-fn label_digest<F>(input_mac: &InputMac<F>) -> blake3::Hash {
+pub(crate) fn label_digest<F>(input_mac: &InputMac<F>) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new_derive_key("argo field_mac_to_ec_mac doubling v1");
     for label in input_mac.x.iter().chain(input_mac.y.iter()) {
         hasher.update(&label.0);
@@ -80,7 +80,7 @@ fn label_digest<F>(input_mac: &InputMac<F>) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn apply_doubling_pad(bytes: &mut [u8; 48], labels: &blake3::Hash, replica: usize) {
+pub(crate) fn apply_doubling_pad(bytes: &mut [u8; 48], labels: &blake3::Hash, replica: usize) {
     let mut hasher = blake3::Hasher::new_keyed(labels.as_bytes());
     hasher.update(&(replica as u64).to_le_bytes());
     let mut pad = [0; 48];
@@ -116,21 +116,24 @@ where
             && self.doubling.len() == KAPPA
     }
 
-    /// Returns the secret if `input_mac` holds the labels of some replica's
-    /// doubling input, for which the converted MAC would be meaningless.
-    pub(crate) fn reveal(&self, input_mac: &InputMac<C::BaseField>) -> Option<Fq> {
-        let labels = label_digest(input_mac);
-        self.doubling
-            .iter()
-            .enumerate()
-            .find_map(|(replica, ciphertext)| {
-                let mut plaintext = *ciphertext;
-                apply_doubling_pad(&mut plaintext, &labels, replica);
-                if plaintext[32..] != [0; 16] {
-                    return None;
-                }
-                Fq::deserialize_compressed(&plaintext[..32]).ok()
-            })
+    /// Decrypts the secret from the doubling ciphertext of `replica`, for an
+    /// input at which `evaluate` returned `DoublingInput(replica)` and the
+    /// converted MAC would be meaningless.
+    pub(crate) fn reveal(
+        &self,
+        replica: usize,
+        input_mac: &InputMac<C::BaseField>,
+    ) -> Result<Fq, EvalError> {
+        let mut plaintext = *self
+            .doubling
+            .get(replica)
+            .ok_or(EvalError::MalformedTable)?;
+        apply_doubling_pad(&mut plaintext, &label_digest(input_mac), replica);
+        let invalid = || EvalError::DecryptionError(type_name::<Self>());
+        if plaintext[32..] != [0; 16] {
+            return Err(invalid());
+        }
+        Fq::deserialize_compressed(&plaintext[..32]).map_err(|_| invalid())
     }
 }
 
@@ -368,12 +371,12 @@ where
 
         // Z = 0 exactly when phi(P) = -K, whose sum is the identity, or when
         // phi(P) = K, where X = 0 too and only `reveal` is meaningful.
-        if xs
+        if let Some(replica) = xs
             .iter()
             .zip(&zs_inv)
-            .any(|(x, z_inv)| x.is_zero() && z_inv.is_zero())
+            .position(|(x, z_inv)| x.is_zero() && z_inv.is_zero())
         {
-            return Err(EvalError::DoublingInput);
+            return Err(EvalError::DoublingInput(replica));
         }
 
         let mut macs = Vec::with_capacity(KAPPA);

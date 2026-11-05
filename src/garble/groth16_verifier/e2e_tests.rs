@@ -26,6 +26,7 @@ use ark_std::{
 use super::*;
 use crate::{
     garble::bivariate::Monomial,
+    garble::field_mac_to_ec_mac::{apply_doubling_pad, label_digest},
     garble::keys::{a_ec_mac_key, b_mac_key},
     mac::endo::{Endo, EndoMacKey, PSqModR},
     utils::error::InputError,
@@ -534,6 +535,30 @@ fn c_cancellation_with_a_second_exceptional_replica_reveals_secret() {
             .map(|(name, input)| (name.as_str(), *input))
             .collect(),
     );
+}
+
+/// A doubling ciphertext decrypts to a canonical plaintext under the labels
+/// of a non-doubling input with probability 2^-130.4. A garbler grinding
+/// invalid proofs against its own honest table finds one after about 2^123
+/// tries; the ciphertext planted here stands in for that one. It must not
+/// replace the secret.
+#[test]
+fn doubling_ciphertext_opens_only_at_doubling_input() {
+    let f = fixture();
+    let C: G1Affine = f.proof.C.into();
+    let invalid = with_c(&f.proof, (C + G1Affine::generator()).into_affine());
+    let input_mac = f.garbling.input_mac_key.encode(&invalid);
+
+    let decoy = Fq::from(7u64);
+    let mut ciphertext = [0; 48];
+    decoy.serialize_compressed(&mut ciphertext[..32]).unwrap();
+    apply_doubling_pad(&mut ciphertext, &label_digest(&input_mac.C), 0);
+    let mut table = deserialize(&serialize(&f.garbling.table));
+    table.c_ec_mac.doubling[0] = ciphertext;
+    assert_eq!(table.c_ec_mac.reveal(0, &input_mac.C).unwrap(), decoy);
+
+    let output = evaluate_table(&f.verifier_key, &table, &f.garbling.input_mac_key, &invalid);
+    assert_eq!(output.unwrap(), Some(f.garbling.secret));
 }
 
 /// Knowledge of a, b with a * b = x1 and a + b = x2.
