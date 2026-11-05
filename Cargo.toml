@@ -21,7 +21,6 @@ derive_more = { version = "2.1.0", features = [ "from", "deref" ]}
 num-bigint = "0.4.6"
 thiserror = "2.0.18"
 arrayvec = "0.7.6"
-rustc-hash = "2.1.1"
 ark-groth16 = { version = "0.6.0", default-features = false, optional = true }
 
 [dev-dependencies]

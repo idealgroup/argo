@@ -1,7 +1,8 @@
 #[cfg(test)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     marker::PhantomData,
     rc::Rc,
 };
@@ -13,7 +14,6 @@ use aes::{
 use ark_ec::AdditiveGroup;
 use ark_ff::{Field, PrimeField};
 use arrayvec::ArrayVec;
-use rustc_hash::FxHashMap;
 
 use crate::{
     garble::Nonce,
@@ -25,8 +25,10 @@ use crate::{
 };
 
 thread_local! {
-    static AES_INSTANCES: RefCell<FxHashMap<[u8; 16], Rc<Aes128>>> =
-        RefCell::new(FxHashMap::default());
+    // The keys are labels a garbler chooses, so a lookup must not cost more
+    // when they collide under some hash.
+    static AES_INSTANCES: RefCell<BTreeMap<[u8; 16], Rc<Aes128>>> =
+        const { RefCell::new(BTreeMap::new()) };
     static AES_SCOPES: Cell<usize> = const { Cell::new(0) };
 }
 
