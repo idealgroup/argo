@@ -443,7 +443,7 @@ impl<const N: usize> Table<N> {
         input_mac_key: &InputMacKey<N>,
     ) -> Result<Self, GarbleError> {
         let _aes_cache = AesCacheScope::new();
-        let parent_nonce = &mut Nonce::new();
+        let parent_nonce = &mut Nonce::for_table(gid);
 
         // Sample `KAPPA_B` random `r`s
         let mut rs = Box::new([Fr::ZERO; KAPPA_B]);
@@ -609,7 +609,7 @@ impl<const N: usize> Table<N> {
             return Err(EvalError::MalformedTable);
         }
         let _aes_cache = AesCacheScope::new();
-        let parent_nonce = &mut Nonce::new();
+        let parent_nonce = &mut Nonce::for_table(self.gid);
 
         let input = match self
             .input_validity

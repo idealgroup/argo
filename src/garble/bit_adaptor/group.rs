@@ -292,3 +292,25 @@ fn test_fq() {
 fn test_fq2() {
     test_bytes_to_group_adaptor::<ark_bn254::Fq2>();
 }
+
+/// Every table has the same counters and a `G` leaves its top bits zero, so
+/// unless the keystream depends on the gid, those ciphertext bits under a
+/// hidden label match across tables and one guess of it checks all of them.
+#[test]
+fn keystream_depends_on_table_gid() {
+    use ark_bn254::Fq;
+    use ark_ff::AdditiveGroup;
+
+    let label = Bit16ByteMac([1; 16]);
+    let zero = BitGroupMac::from(Fq::ZERO);
+    let keystream = |gid| {
+        <Bit16ByteMac as Encrypt<AesCtr, BitGroupMac<Fq>>>::encrypt(
+            &label,
+            None,
+            &mut Nonce::for_table(gid),
+            &zero,
+        )
+        .unwrap()
+    };
+    assert_ne!(keystream([2; 16]), keystream([3; 16]));
+}

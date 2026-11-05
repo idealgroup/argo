@@ -1,6 +1,7 @@
 use rand_core::CryptoRngCore;
 
 use crate::{
+    garble::groth16_verifier::GID,
     mac::Mac,
     utils::error::{EvalError, GarbleError, NonceError},
 };
@@ -52,23 +53,35 @@ pub struct Nonce {
     counters: [u16; 8],
     // The current level
     level: usize,
+    // XORed into `bytes`. Every table has the same counters, so without its
+    // gid two tables would key the same AES calls with a reused label.
+    gid: GID,
 }
 
 impl Nonce {
     /// Initializes a nonce with all counters set to 0.
     pub fn new() -> Self {
+        Self::for_table([0; 16])
+    }
+
+    /// The root nonce of the table with `gid`.
+    pub(crate) fn for_table(gid: GID) -> Self {
         Self {
             counters: [0; 8],
             level: 0,
+            gid,
         }
     }
 
-    /// Returns self.counters as a [u8; 16], each counter little-endian.
+    /// Returns self.counters as a [u8; 16], each counter little-endian, XOR
+    /// the gid.
     #[inline]
     pub fn bytes(&self) -> [u8; 16] {
-        let mut bytes = [0; 16];
+        let mut bytes = self.gid;
         for (bytes, counter) in bytes.chunks_exact_mut(2).zip(self.counters) {
-            bytes.copy_from_slice(&counter.to_le_bytes());
+            for (byte, counter) in bytes.iter_mut().zip(counter.to_le_bytes()) {
+                *byte ^= counter;
+            }
         }
         bytes
     }
@@ -82,8 +95,8 @@ impl Nonce {
         // Return the child nonce by copying its parents counter, and
         // incrementing the level index
         Ok(Self {
-            counters: self.counters,
             level: self.level + 1,
+            ..*self
         })
     }
 

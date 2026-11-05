@@ -135,7 +135,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
         } else {
             // If input.right = 0, derive mac_right by hashing input_mac.right
             // to get hash(input_mac_key.right.encode(0))
-            let dst = bit_adaptor::Table::derive_dst(&self.gid, &nonce);
+            let dst = bit_adaptor::Table::derive_dst(&nonce);
 
             let hash = AesMiTCCR::hash(&dst, &input_mac.right());
 

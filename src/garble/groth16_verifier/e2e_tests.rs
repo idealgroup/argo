@@ -164,7 +164,7 @@ fn assert_replayed_keys<const N: usize>(
         ..
     } = garbling;
     let input_mac = input_mac_key.encode(input);
-    let mut nonce = Nonce::new();
+    let mut nonce = Nonce::for_table(table.gid);
     assert!(
         table
             .input_validity

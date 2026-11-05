@@ -22,9 +22,8 @@ use crate::{
     },
 };
 
-/// The AES key of a pad: `dst` itself. `dst` already mixes the nonce into the
-/// gid, so mixing it in again would cancel it and key every pad of a table by
-/// the public gid alone.
+/// The AES key of a pad: `dst` itself. `dst` is the nonce, which already
+/// carries the gid, so mixing either in again would cancel it.
 fn pad_key(dst: &[u8]) -> [u8; AES_BLOCK_SIZE] {
     let mut key = [0; AES_BLOCK_SIZE];
     key.iter_mut().zip(dst).for_each(|(key, dst)| *key = *dst);
@@ -110,14 +109,9 @@ impl Table<AesMiTCCR, Bit16ByteMac, Bit16ByteMac> {
         self.gid == Some(*gid)
     }
 
-    pub(crate) fn derive_dst(gid: &GID, nonce: &Nonce) -> [u8; 16] {
-        let mut dst = [0; AES_BLOCK_SIZE];
-        dst.iter_mut()
-            .zip(gid.iter())
-            .zip(nonce.bytes().iter())
-            .for_each(|((dst, gid), nonce)| *dst = gid ^ nonce);
-
-        dst
+    /// The nonce's bytes, which are its counters XOR the table's gid.
+    pub(crate) fn derive_dst(nonce: &Nonce) -> [u8; 16] {
+        nonce.bytes()
     }
 }
 
@@ -136,7 +130,7 @@ impl Circuit<bool, Bit16ByteMac, bool, Bit16ByteMac>
         let Aux { gid, phi } = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
 
-        let dst = Self::derive_dst(&gid, parent_nonce);
+        let dst = Self::derive_dst(parent_nonce);
 
         // The output_mac_key is derived s.t.
         // - output_mac_key.phi = phi, and
@@ -184,8 +178,8 @@ impl Circuit<bool, Bit16ByteMac, bool, Bit16ByteMac>
         input: &bool,
         input_mac: &Bit16ByteMac,
     ) -> Result<(bool, Bit16ByteMac), EvalError> {
-        let gid = self.gid.ok_or(EvalError::MissingGID(type_name::<Self>()))?;
-        let dst = Self::derive_dst(&gid, parent_nonce);
+        self.gid.ok_or(EvalError::MissingGID(type_name::<Self>()))?;
+        let dst = Self::derive_dst(parent_nonce);
 
         let output_mac = if !(*input) {
             // If the input is `false`, the `output_mac` will be
@@ -273,8 +267,8 @@ fn true_label_pad_is_keyed_by_dst() {
     let input_mac_key = Bit16ByteMacKey::random_key(&mut rng);
     let gid = GID::random(&mut rng);
     let phi = <[u8; 16]>::random(&mut rng);
-    let mut nonce = Nonce::new().fork().unwrap();
-    let dst = Table::derive_dst(&gid, &nonce);
+    let mut nonce = Nonce::for_table(gid).fork().unwrap();
+    let dst = Table::derive_dst(&nonce);
     assert_ne!(dst, gid);
 
     let (table, output_mac_key) = Table::<AesMiTCCR, Bit16ByteMac, Bit16ByteMac>::garble(
