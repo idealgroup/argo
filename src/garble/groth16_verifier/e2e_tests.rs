@@ -1143,7 +1143,11 @@ fn malformed_tables_are_rejected() {
     for (name, mutate) in mutations {
         let mut table = deserialize(&bytes);
         mutate(&mut table);
-        let table = deserialize(&serialize(&table));
+        let mutated = serialize(&table);
+        let Ok(table) = Table::<1>::deserialize_compressed(&mutated[..]) else {
+            assert!(mutated.len() > bytes.len(), "{name}");
+            continue;
+        };
         assert!(!table.has_garbled_shape(), "{name}");
         let output = evaluate_table(&f.verifier_key, &table, &f.garbling.input_mac_key, &f.proof);
         assert!(
@@ -1151,6 +1155,33 @@ fn malformed_tables_are_rejected() {
             "{name}: {output:?}"
         );
     }
+}
+
+/// The garbler writes the vector lengths too. A first range check claiming
+/// 1000 extra adaptors, and holding them, is a valid less_than table on its
+/// own, but the whole table must stop decoding at the garbled size instead
+/// of reading every element it claims.
+#[test]
+fn inflated_vector_length_fails_to_deserialize() {
+    use crate::garble::binary::less_than;
+
+    let f = fixture();
+    let bytes = serialize(&f.garbling.table);
+    // x_range_check[0] comes first: two 16-byte labels, the u64 adaptor
+    // count, then 17-byte adaptors (an absent gid and a 16-byte ciphertext).
+    let count = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+    assert_eq!(count, Fr::MODULUS_BIT_SIZE as u64);
+    let extra = 1000;
+    let mut inflated = bytes[..32].to_vec();
+    inflated.extend((count + extra).to_le_bytes());
+    for _ in 0..extra {
+        inflated.extend(&bytes[40..57]);
+    }
+    inflated.extend(&bytes[40..]);
+
+    let range_check = less_than::Table::<Fr>::deserialize_compressed(&inflated[..]).unwrap();
+    assert!(!range_check.has_garbled_shape(&f.garbling.table.gid));
+    assert!(Table::<1>::deserialize_compressed(&inflated[..]).is_err());
 }
 
 /// Tables of the right shape can still disagree with each other. The compact

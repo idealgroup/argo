@@ -25,7 +25,9 @@ use ark_ec::{
     short_weierstrass::{Affine, Projective},
 };
 use ark_ff::{AdditiveGroup, CyclotomicMultSubgroup, Field, PrimeField};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, Read, SerializationError, Valid, Validate,
+};
 use ark_std::UniformRand;
 use num_bigint::BigInt;
 use rand_chacha::ChaCha20Rng;
@@ -413,7 +415,7 @@ pub fn evaluate<const N: usize>(
         .flatten()
 }
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(CanonicalSerialize)]
 /// This table is structured as a collection of smaller modular tables.
 pub struct Table<const N: usize = 1> {
     // Check that the input is well-formed
@@ -432,6 +434,49 @@ pub struct Table<const N: usize = 1> {
     pub conditional_reveal: conditional_reveal::Table<KAPPA_B>,
     // Global ID of this instance
     gid: GID,
+}
+
+impl<const N: usize> CanonicalDeserialize for Table<N> {
+    fn deserialize_with_mode<R: Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        // The vector lengths in the bytes come from the garbler, so they can
+        // ask for far more elements than `garble` gives.
+        let mut reader = reader.take(Self::garbled_size(compress) as u64);
+        Ok(Self {
+            input_validity: CanonicalDeserialize::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
+            x_G: CanonicalDeserialize::deserialize_with_mode(&mut reader, compress, validate)?,
+            a_ec_mac: CanonicalDeserialize::deserialize_with_mode(&mut reader, compress, validate)?,
+            b_ec_mac: CanonicalDeserialize::deserialize_with_mode(&mut reader, compress, validate)?,
+            c_ec_mac: CanonicalDeserialize::deserialize_with_mode(&mut reader, compress, validate)?,
+            pairing: CanonicalDeserialize::deserialize_with_mode(&mut reader, compress, validate)?,
+            conditional_reveal: CanonicalDeserialize::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
+            gid: CanonicalDeserialize::deserialize_with_mode(&mut reader, compress, validate)?,
+        })
+    }
+}
+
+impl<const N: usize> Valid for Table<N> {
+    fn check(&self) -> Result<(), SerializationError> {
+        self.input_validity.check()?;
+        self.x_G.check()?;
+        self.a_ec_mac.check()?;
+        self.b_ec_mac.check()?;
+        self.c_ec_mac.check()?;
+        self.pairing.check()?;
+        self.conditional_reveal.check()?;
+        self.gid.check()
+    }
 }
 
 impl<const N: usize> Table<N> {
@@ -583,6 +628,15 @@ impl<const N: usize> Table<N> {
     /// The global ID that domain-separates this table's hashes.
     pub fn gid(&self) -> GID {
         self.gid
+    }
+
+    /// The serialized length of every table `garble` gives, past which
+    /// deserialization stops reading.
+    pub fn garbled_size(compress: Compress) -> usize {
+        match compress {
+            Compress::Yes => 18_045_159 + 30_322 * N,
+            Compress::No => 18_051_175 + 33_362 * N,
+        }
     }
 
     /// Whether every part has the shape `garble` produces: the replica and bit

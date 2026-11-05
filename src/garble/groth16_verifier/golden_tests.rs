@@ -9,16 +9,19 @@ use ark_std::UniformRand;
 
 use super::*;
 
-/// Hashes the table, the secret and every label pair garbled from `seed`.
-fn instance_hash<const N: usize>(seed: u8) -> String {
+fn verifier_key<const N: usize>(seed: u8) -> VerifierKey<N> {
     let mut rng = ChaCha20Rng::from_seed([!seed; 32]);
-    let verifier_key = VerifierKey::<N> {
+    VerifierKey {
         G1: std::array::from_fn(|_| G1Affine::rand(&mut rng)),
         H1: G2Affine::rand(&mut rng),
         H2: G2Affine::rand(&mut rng),
         c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,
-    };
-    let garbling = garble(&verifier_key, [seed; 32]).unwrap();
+    }
+}
+
+/// Hashes the table, the secret and every label pair garbled from `seed`.
+fn instance_hash<const N: usize>(seed: u8) -> String {
+    let garbling = garble(&verifier_key::<N>(seed), [seed; 32]).unwrap();
 
     let mut bytes = Vec::new();
     garbling.table.serialize_compressed(&mut bytes).unwrap();
@@ -39,6 +42,28 @@ fn golden_instance_hashes() {
             "55d654e6eec81543e865d358765d113548bedf06c696a991a1b9e5581c82e1d5",
         ]
     );
+}
+
+/// Deserialization stops at `garbled_size`, so it must be the exact length
+/// of every garbled table, for each `N` and both encodings.
+#[test]
+fn garbled_size_is_the_serialized_size() {
+    fn check<const N: usize>() {
+        let table = garble(&verifier_key::<N>(0), [0; 32]).unwrap().table;
+        for compress in [Compress::Yes, Compress::No] {
+            let mut bytes = Vec::new();
+            table.serialize_with_mode(&mut bytes, compress).unwrap();
+            assert_eq!(bytes.len(), Table::<N>::garbled_size(compress));
+            let decoded =
+                Table::<N>::deserialize_with_mode(&bytes[..], compress, Validate::Yes).unwrap();
+            let mut again = Vec::new();
+            decoded.serialize_with_mode(&mut again, compress).unwrap();
+            assert!(again == bytes);
+        }
+    }
+    check::<0>();
+    check::<1>();
+    check::<2>();
 }
 
 #[test]
