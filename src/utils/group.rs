@@ -51,14 +51,19 @@ fn to_u64_array<const N: usize>(bytes: &[u8]) -> [u64; N] {
     result
 }
 
-/// The input length is fixed because the conversion splits at the 17-byte
-/// offsets above.
+/// Maps the little-endian integer w of the bytes to w · R⁻¹, where R = 2^256
+/// mod p is the Montgomery constant, and not to w mod p as
+/// `PrimeField::from_le_bytes_mod_order` does: the bytes go straight into the
+/// Montgomery representation, which saves a multiplication. `hash_to_field`
+/// only needs the output to be close to uniform, and a fixed nonzero factor
+/// keeps it so. The input length is fixed because the conversion splits at
+/// the 17-byte offsets above.
 pub trait FromLeBytesModOrder {
     fn from_le_bytes_mod_order(bytes: &[u8; LEN_PER_BASE_ELEM]) -> Self;
 }
 
 impl FromLeBytesModOrder for Fq {
-    /// Optimized implementation of from_le_bytes_mod_order for Bn254::Fq
+    /// w · R⁻¹ in Bn254::Fq for the bytes' integer w.
     #[inline]
     fn from_le_bytes_mod_order(bytes: &[u8; LEN_PER_BASE_ELEM]) -> Fq {
         let num_modulus_bytes = Fq::MODULUS_BIT_SIZE.div_ceil(8) as usize;
@@ -78,7 +83,7 @@ impl FromLeBytesModOrder for Fq {
         hi *= *FQ_LO_BYTES_OFFSET;
         hi += lo;
 
-        // Sanity-check equivalence with arkworks unoptimised implementation
+        // `new_unchecked(R2)` has value R, so this checks hi · R = w mod p.
         #[cfg(test)]
         assert_eq!(
             hi * Fq::new_unchecked(Fq::R2),
@@ -90,7 +95,7 @@ impl FromLeBytesModOrder for Fq {
 }
 
 impl FromLeBytesModOrder for Fr {
-    /// Optimized implementation of from_le_bytes_mod_order for Bn254::Fr
+    /// w · R⁻¹ in Bn254::Fr for the bytes' integer w.
     /// FIXME test more cases?!
     #[inline]
     fn from_le_bytes_mod_order(bytes: &[u8; LEN_PER_BASE_ELEM]) -> Fr {
@@ -111,7 +116,7 @@ impl FromLeBytesModOrder for Fr {
         hi *= *FR_LO_BYTES_OFFSET;
         hi += lo;
 
-        // Sanity-check equivalence with arkworks unoptimised implementation
+        // `new_unchecked(R2)` has value R, so this checks hi · R = w mod p.
         #[cfg(test)]
         assert_eq!(
             hi * Fr::new_unchecked(Fr::R2),
