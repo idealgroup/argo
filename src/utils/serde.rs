@@ -115,9 +115,22 @@ impl<T: CanonicalDeserialize, B: LenBound> CanonicalDeserialize for BoundedVec<T
     }
 }
 
-/// `[T; N]` with the same encoding. ark-serialize 0.6.0's array impl leaks
-/// the elements decoded before an error; collecting into a `Vec` drops them.
-pub(crate) struct Array<T, const N: usize>(pub(crate) [T; N]);
+/// `[T; N]` with the same encoding, kept on the heap so that a table's stack
+/// size does not grow with `N`. ark-serialize 0.6.0's array impl leaks the
+/// elements decoded before an error; collecting into a `Vec` drops them.
+pub(crate) struct Array<T, const N: usize>(pub(crate) Box<[T; N]>);
+
+impl<T, const N: usize> TryFrom<Vec<T>> for Array<T, N> {
+    type Error = Vec<T>;
+
+    fn try_from(values: Vec<T>) -> Result<Self, Vec<T>> {
+        values
+            .into_boxed_slice()
+            .try_into()
+            .map(Self)
+            .map_err(Vec::from)
+    }
+}
 
 impl<T, const N: usize> Deref for Array<T, N> {
     type Target = [T; N];
@@ -164,10 +177,7 @@ impl<T: CanonicalDeserialize, const N: usize> CanonicalDeserialize for Array<T, 
         let values = (0..N)
             .map(|_| T::deserialize_with_mode(&mut reader, compress, validate))
             .collect::<Result<Vec<_>, _>>()?;
-        values
-            .try_into()
-            .map(Self)
-            .map_err(|_| SerializationError::InvalidData)
+        Self::try_from(values).map_err(|_| SerializationError::InvalidData)
     }
 }
 
@@ -310,9 +320,11 @@ mod tests {
         let mut expected = Vec::new();
         values.serialize_compressed(&mut expected).unwrap();
         let mut bytes = Vec::new();
-        Array(values).serialize_compressed(&mut bytes).unwrap();
+        Array(Box::new(values))
+            .serialize_compressed(&mut bytes)
+            .unwrap();
         assert_eq!(bytes, expected);
         let decoded = Array::<u64, 3>::deserialize_compressed(&bytes[..]).unwrap();
-        assert_eq!(decoded.0, values);
+        assert_eq!(*decoded, values);
     }
 }

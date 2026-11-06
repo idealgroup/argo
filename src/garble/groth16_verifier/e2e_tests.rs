@@ -1380,3 +1380,47 @@ fn huge_length_prefixes_are_rejected() {
         }
     }
 }
+
+/// Runs `f` on a thread with the 2 MiB stack Rust gives spawned threads.
+fn on_thread_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn_scoped(scope, f)
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
+
+/// Each garbled input adds an x_G table and a range check, so a table with
+/// many must still fit a thread's stack when it is garbled, decoded, also
+/// from bytes that fail, and evaluated. A stack overflow aborts the process,
+/// and with it the evaluation of every other table.
+#[test]
+fn wide_tables_fit_a_thread_stack() {
+    const N: usize = 128;
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (vk, [(proof, x)]) = multiples::<N, 1>(&mut rng, [5]);
+    let verifier_key = VerifierKey::<N>::from_groth16(&vk, &[PublicInput::Garbled; N]).unwrap();
+    let proof = proof_input(&proof, x);
+    let mut wrong = proof;
+    wrong.x[0] += Fr::ONE;
+
+    let garbling = on_thread_stack(|| garble_with(SEED, &verifier_key));
+    let bytes = serialize(&garbling.table);
+    assert_eq!(bytes.len(), Table::<N>::garbled_size(Compress::Yes));
+    let table = on_thread_stack(|| Table::<N>::deserialize_compressed(&bytes[..]).unwrap());
+    assert!(serialize(&table) == bytes);
+    let outputs = on_thread_stack(|| {
+        [&proof, &wrong].map(|input| {
+            evaluate_table(&verifier_key, &table, &garbling.input_mac_key, input).unwrap()
+        })
+    });
+    assert_eq!(outputs, [None, Some(garbling.secret)]);
+
+    let zeros = vec![0; bytes.len()];
+    for malformed in [&[][..], &zeros[..]] {
+        assert!(on_thread_stack(|| Table::<N>::deserialize_compressed(malformed)).is_err());
+    }
+}

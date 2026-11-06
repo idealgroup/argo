@@ -595,9 +595,13 @@ impl<const N: usize> Table<N> {
                 keys.push(key);
             }
             // These unwraps cannot fail because both vectors hold one entry
-            // per garbled input.
-            let tables: [_; N] = tables.try_into().unwrap_or_else(|_| panic!());
-            let keys: [_; N] = keys.try_into().unwrap_or_else(|_| panic!());
+            // per garbled input. Each entry takes kilobytes, so neither may
+            // become an array on the stack.
+            let tables = Array::try_from(tables).unwrap_or_else(|_| panic!());
+            let keys: Box<[_; N]> = keys
+                .into_boxed_slice()
+                .try_into()
+                .unwrap_or_else(|_| panic!());
             (tables, keys)
         };
 
@@ -615,7 +619,7 @@ impl<const N: usize> Table<N> {
 
         Ok(Self {
             input_validity,
-            x_G: Array(x_G),
+            x_G,
             a_ec_mac,
             b_ec_mac,
             c_ec_mac,

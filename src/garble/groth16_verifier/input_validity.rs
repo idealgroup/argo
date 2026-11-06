@@ -208,13 +208,13 @@ impl<const N: usize> Table<N> {
         let x_range_check = x_range_check.try_into().unwrap_or_else(|_| panic!());
 
         let table = Self {
-            x_range_check: Array(x_range_check),
-            a_range_check: Array(a_range_check),
+            x_range_check,
+            a_range_check,
             a_curve_check,
-            b_range_check: Array(b_range_check),
+            b_range_check,
             b_curve_check,
             b_g2_check,
-            c_range_check: Array(c_range_check),
+            c_range_check,
             c_curve_check,
             gid: *gid,
         };
@@ -266,7 +266,7 @@ impl<const N: usize> Table<N> {
         // Checks that A.x, A.y are valid Fq elements, returning the `secret`
         // otherwise.
         let A = {
-            let [x_table, y_table] = &self.a_range_check.0;
+            let [x_table, y_table] = &*self.a_range_check;
             bivariate::Input {
                 x: or_reveal!(range_check(
                     x_table,
@@ -341,7 +341,7 @@ impl<const N: usize> Table<N> {
         // Checks that C.x, C.y are valid Fq elements, returning the `secret`
         // otherwise.
         let C = {
-            let [x_table, y_table] = &self.c_range_check.0;
+            let [x_table, y_table] = &*self.c_range_check;
             bivariate::Input {
                 x: or_reveal!(range_check(
                     x_table,
