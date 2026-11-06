@@ -142,7 +142,7 @@ impl AesCtr {
     /// Panics if the number of bytes is not a multiple of AES_BLOCK_SIZE.
     pub(crate) fn num_blocks<F: Field>() -> usize {
         let base_prime_field_num_bytes = F::BasePrimeField::MODULUS_BIT_SIZE.div_ceil(8) as usize;
-        assert_eq!(base_prime_field_num_bytes & AES_BLOCK_SIZE, 0);
+        assert_eq!(base_prime_field_num_bytes % AES_BLOCK_SIZE, 0);
         let num_blocks = base_prime_field_num_bytes / AES_BLOCK_SIZE;
 
         F::extension_degree() as usize * num_blocks
