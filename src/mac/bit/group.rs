@@ -1,7 +1,7 @@
 use ark_ff::AdditiveGroup;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
 use derive_more::{Deref, From};
+use rand_core::CryptoRngCore;
 
 use crate::mac::{Mac, MacKey, Random, RandomFromPhi, group::GroupMacKey};
 
@@ -15,7 +15,7 @@ where
 {
     type Phi = G;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &Self::Phi) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &Self::Phi) -> Self {
         let k = G::rand(rng);
         Self { phi: *phi, k }
     }
@@ -44,7 +44,7 @@ where
         }
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let phi = G::rand(rng);
         <Self as RandomFromPhi<bool, BitGroupMac<G>>>::random_from_phi(rng, &phi)
     }
@@ -57,7 +57,7 @@ where
     type Key = GroupMacKey<G>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> bool {
+    fn random_input(rng: &mut impl CryptoRngCore) -> bool {
         use ark_std::rand::Rng;
         rng.gen_bool(0.5)
     }

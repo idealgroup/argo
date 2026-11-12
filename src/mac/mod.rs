@@ -3,8 +3,8 @@ use std::{marker::PhantomData, ops::Neg};
 use ark_bn254::{Fq, Fq2, Fr};
 use ark_ff::UniformRand;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{RngCore, rngs::StdRng};
 use derive_more::Deref;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::Nonce,
@@ -26,7 +26,7 @@ pub trait Mac<Value>: Sized {
     type Key: MacKey<Value, Self>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Value;
+    fn random_input(rng: &mut impl CryptoRngCore) -> Value;
 }
 
 pub trait MacKey<V, M> {
@@ -34,13 +34,13 @@ pub trait MacKey<V, M> {
     fn encode(&self, value: &V) -> M;
     #[cfg(test)]
     fn decode(&self, mac: &M) -> V;
-    fn random_key(rng: &mut StdRng) -> Self;
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self;
 }
 
 pub trait RandomFromPhi<V, M>: MacKey<V, M> {
     type Phi: Random;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &Self::Phi) -> Self;
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &Self::Phi) -> Self;
 }
 
 pub trait Encrypt<H: Hash, Message> {
@@ -123,7 +123,7 @@ where
     type Key = [BaseMacKey; KAPPA];
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> BaseValue {
+    fn random_input(rng: &mut impl CryptoRngCore) -> BaseValue {
         BaseMac::random_input(rng)
     }
 }
@@ -160,7 +160,7 @@ where
         first_value
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let mut keys = Vec::with_capacity(KAPPA);
         for _ in 0..KAPPA {
             keys.push(BaseMacKey::random_key(rng));
@@ -187,7 +187,7 @@ impl<V, M> MacKey<V, M> for IdentityMacKey {
         unimplemented!()
     }
 
-    fn random_key(_rng: &mut StdRng) -> Self {
+    fn random_key(_rng: &mut impl CryptoRngCore) -> Self {
         unimplemented!()
     }
 }
@@ -196,39 +196,39 @@ impl<V> Mac<V> for IdentityMac<V> {
     type Key = IdentityMacKey;
 
     #[cfg(test)]
-    fn random_input(_rng: &mut StdRng) -> V {
+    fn random_input(_rng: &mut impl CryptoRngCore) -> V {
         unimplemented!()
     }
 }
 
 pub trait Random {
-    fn random(rng: &mut StdRng) -> Self;
+    fn random(rng: &mut impl CryptoRngCore) -> Self;
 }
 
 impl Random for () {
-    fn random(_rng: &mut StdRng) -> Self {}
+    fn random(_rng: &mut impl CryptoRngCore) -> Self {}
 }
 
 impl Random for Fq {
-    fn random(rng: &mut StdRng) -> Self {
+    fn random(rng: &mut impl CryptoRngCore) -> Self {
         Fq::rand(rng)
     }
 }
 
 impl Random for Fr {
-    fn random(rng: &mut StdRng) -> Self {
+    fn random(rng: &mut impl CryptoRngCore) -> Self {
         Fr::rand(rng)
     }
 }
 
 impl Random for Fq2 {
-    fn random(rng: &mut StdRng) -> Self {
+    fn random(rng: &mut impl CryptoRngCore) -> Self {
         Fq2::rand(rng)
     }
 }
 
 impl Random for [u8; 16] {
-    fn random(rng: &mut StdRng) -> Self {
+    fn random(rng: &mut impl CryptoRngCore) -> Self {
         let mut bytes = [0u8; 16];
         rng.fill_bytes(&mut bytes);
         bytes

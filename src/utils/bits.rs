@@ -32,18 +32,26 @@ impl FromBits<bool, Fq> for Fq {
     }
 }
 
-impl FromBits<bool, Fq2> for Fq2 {
-    /// # Panics
-    ///
-    /// Panics if `bits` is not of length Fq::MODULUS_BIT_SIZE * 2.
-    fn from_bits<I: DoubleEndedIterator<Item = bool> + ExactSizeIterator>(
-        mut bits: I,
-    ) -> Option<Fq2> {
-        let fp_len = Fq::MODULUS_BIT_SIZE as usize;
-        assert_eq!(bits.len(), fp_len * 2);
+/// Splits the bits of an `Fq2` into those of `c0` and of `c1`, or `None` unless
+/// there are Fq::MODULUS_BIT_SIZE * 2 of them. The halves must be separated
+/// before converting: `FromBits<Fq, Fq>` reads its bits from the back, which
+/// through a `take` of the whole iterator would consume `c1`'s bits.
+fn fq2_halves<B>(bits: impl ExactSizeIterator<Item = B>) -> Option<(Vec<B>, Vec<B>)> {
+    let fp_len = Fq::MODULUS_BIT_SIZE as usize;
+    if bits.len() != fp_len * 2 {
+        return None;
+    }
+    let mut c0: Vec<B> = bits.collect();
+    let c1 = c0.split_off(fp_len);
+    Some((c0, c1))
+}
 
-        let c0 = Fq::from_bits(bits.by_ref().take(fp_len))?;
-        let c1 = Fq::from_bits(bits.skip(fp_len))?;
+impl FromBits<bool, Fq2> for Fq2 {
+    /// Returns `None` unless `bits` has length Fq::MODULUS_BIT_SIZE * 2.
+    fn from_bits<I: DoubleEndedIterator<Item = bool> + ExactSizeIterator>(bits: I) -> Option<Fq2> {
+        let (c0, c1) = fq2_halves(bits)?;
+        let c0 = Fq::from_bits(c0.into_iter())?;
+        let c1 = Fq::from_bits(c1.into_iter())?;
 
         Fq2::from_base_prime_field_elems([c0, c1])
     }
@@ -62,31 +70,25 @@ impl FromBits<Fr, Fr> for Fr {
 }
 
 impl FromBits<Fq, Fq2> for Fq2 {
-    /// # Panics
-    ///
-    /// Panics if `bits` is not of length Fq::MODULUS_BIT_SIZE * 2.
-    fn from_bits<I: DoubleEndedIterator<Item = Fq> + ExactSizeIterator>(
-        mut bits: I,
-    ) -> Option<Fq2> {
-        let fp_len = Fq::MODULUS_BIT_SIZE as usize;
-        assert_eq!(bits.len(), fp_len * 2);
-
-        let c0 = Fq::from_bits(bits.by_ref().take(fp_len))?;
-        let c1 = Fq::from_bits(bits.skip(fp_len))?;
+    /// Returns `None` unless `bits` has length Fq::MODULUS_BIT_SIZE * 2.
+    fn from_bits<I: DoubleEndedIterator<Item = Fq> + ExactSizeIterator>(bits: I) -> Option<Fq2> {
+        let (c0, c1) = fq2_halves(bits)?;
+        let c0 = Fq::from_bits(c0.into_iter())?;
+        let c1 = Fq::from_bits(c1.into_iter())?;
 
         Fq2::from_base_prime_field_elems([c0, c1])
     }
 }
 
 impl FromBits<Fq2, Fq2> for Fq2 {
-    /// # Panics
-    ///
-    /// Panics if `bits` is not of length Fq::MODULUS_BIT_SIZE * 2.
+    /// Returns `None` unless `bits` has length Fq::MODULUS_BIT_SIZE * 2.
     fn from_bits<I: DoubleEndedIterator<Item = Fq2> + ExactSizeIterator>(
         mut bits: I,
     ) -> Option<Fq2> {
         let fp_len = Fq::MODULUS_BIT_SIZE as usize;
-        assert_eq!(bits.len(), fp_len * 2);
+        if bits.len() != fp_len * 2 {
+            return None;
+        }
 
         let c0_bits: Vec<_> = bits.by_ref().take(fp_len).collect();
         let c0 = pow_two_lincomb::<_, Fq2, Fq2>(c0_bits);
@@ -159,6 +161,28 @@ where
         .into_iter()
         .rev()
         .fold(Value::zero(), |acc, value| acc.double() + value)
+}
+
+#[test]
+fn fq2_from_bits_keeps_both_coordinates() {
+    use ark_std::{
+        UniformRand,
+        rand::{SeedableRng, rngs::StdRng},
+    };
+
+    let mut rng = StdRng::seed_from_u64(0);
+    for _ in 0..10 {
+        let value = Fq2::rand(&mut rng);
+        let bits = value.to_bits();
+        let from_bools = <Fq2 as FromBits<bool, Fq2>>::from_bits(bits.iter().copied());
+        assert_eq!(from_bools, Some(value));
+        let from_fields = <Fq2 as FromBits<Fq, Fq2>>::from_bits(bits.iter().map(|b| Fq::from(*b)));
+        assert_eq!(from_fields, Some(value));
+        assert_eq!(
+            <Fq2 as FromBits<bool, Fq2>>::from_bits(bits[1..].iter().copied()),
+            None
+        );
+    }
 }
 
 /// Computes ∑ v_i * N^i using Horner's method

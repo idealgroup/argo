@@ -2,8 +2,11 @@
 
 use std::marker::PhantomData;
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, Read, SerializationError, Valid, Validate,
+    Write,
+};
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{Circuit, Nonce},
@@ -51,15 +54,43 @@ impl InputMacKey {
     }
 }
 
-#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
+/// XOR is free, so the table is empty and serializes to no bytes.
+#[derive(Debug, Clone)]
 pub(crate) struct Table;
+
+// ark-serialize 0.6 can't derive these for a struct without fields.
+impl Valid for Table {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalSerialize for Table {
+    fn serialize_with_mode<W: Write>(&self, _: W, _: Compress) -> Result<(), SerializationError> {
+        Ok(())
+    }
+
+    fn serialized_size(&self, _: Compress) -> usize {
+        0
+    }
+}
+
+impl CanonicalDeserialize for Table {
+    fn deserialize_with_mode<R: Read>(
+        _: R,
+        _: Compress,
+        _: Validate,
+    ) -> Result<Self, SerializationError> {
+        Ok(Self)
+    }
+}
 
 impl Circuit<Input, InputMac, bool, OutputMac> for Table {
     type Aux = ();
 
     fn garble(
         _parent_nonce: &mut Nonce,
-        _rng: &mut StdRng,
+        _rng: &mut impl CryptoRngCore,
         _aux: Option<Self::Aux>,
         input_mac_key: &<BinaryInputMac<Xor> as Mac<BinaryInput<Xor>>>::Key,
     ) -> Result<(Self, <OutputMac as Mac<bool>>::Key), GarbleError> {
@@ -80,7 +111,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
 #[test]
 fn test_xor_circuit() {
     use crate::mac::MacKey;
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const SEED: u64 = 0;
 

@@ -7,8 +7,8 @@ use ark_ec::{
     short_weierstrass::{Affine, Projective},
 };
 use ark_ff::{AdditiveGroup, PrimeField, UniformRand, Zero};
-use ark_std::rand::rngs::StdRng;
 use num_bigint::BigInt;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{
@@ -142,7 +142,7 @@ fn derive_phis_from_x(x: Fr) -> [EndoScalar<g1::Config>; KAPPA_A] {
 }
 
 pub(crate) fn a_ec_mac_key(
-    rng: &mut StdRng,
+    rng: &mut impl CryptoRngCore,
     x: Fr,
 ) -> [EndoMacKey<g1::Config, Affine<g1::Config>>; KAPPA_A] {
     let A_phis = derive_phis_from_x(x);
@@ -181,7 +181,7 @@ pub(crate) fn a_ec_mac_key(
 }
 
 pub(crate) fn b_mac_key(
-    rng: &mut StdRng,
+    rng: &mut impl CryptoRngCore,
     x: Fr,
     rs: [Fr; KAPPA_B],
 ) -> (

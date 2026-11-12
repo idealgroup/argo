@@ -1,8 +1,9 @@
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
+    garble::groth16_verifier::GID,
     mac::Mac,
-    utils::error::{EvalError, GarbleError},
+    utils::error::{EvalError, GarbleError, NonceError},
 };
 
 pub(crate) mod bilinear;
@@ -27,7 +28,7 @@ where
     /// Given an input_mac_key, return a garbling table and an output MAC key
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac as Mac<InputValue>>::Key,
     ) -> Result<(Self, <OutputMac as Mac<OutputValue>>::Key), GarbleError>;
@@ -52,39 +53,88 @@ pub struct Nonce {
     counters: [u16; 8],
     // The current level
     level: usize,
+    // XORed into `bytes`. Every table has the same counters, so without its
+    // gid two tables would key the same AES calls with a reused label.
+    gid: GID,
 }
 
 impl Nonce {
     /// Initializes a nonce with all counters set to 0.
     pub fn new() -> Self {
+        Self::for_table([0; 16])
+    }
+
+    /// The root nonce of the table with `gid`.
+    pub(crate) fn for_table(gid: GID) -> Self {
         Self {
             counters: [0; 8],
             level: 0,
+            gid,
         }
     }
 
-    /// Returns self.counters as a [u8; 16].
+    /// Returns self.counters as a [u8; 16], each counter little-endian, XOR
+    /// the gid.
     #[inline]
     pub fn bytes(&self) -> [u8; 16] {
-        unsafe { std::mem::transmute(self.counters) }
+        let mut bytes = self.gid;
+        for (bytes, counter) in bytes.chunks_exact_mut(2).zip(self.counters) {
+            for (byte, counter) in bytes.iter_mut().zip(counter.to_le_bytes()) {
+                *byte ^= counter;
+            }
+        }
+        bytes
     }
 
     /// Forks the parent nonce to return a child nonce
-    pub fn fork(&mut self) -> Self {
+    pub fn fork(&mut self) -> Result<Self, NonceError> {
         // Increment the counter at the current level to register that one more
         // child has been created
-        self.update();
+        self.update()?;
 
         // Return the child nonce by copying its parents counter, and
         // incrementing the level index
-        Self {
-            counters: self.counters,
+        Ok(Self {
             level: self.level + 1,
-        }
+            ..*self
+        })
     }
 
     #[inline]
-    fn update(&mut self) {
-        self.counters[self.level] += 1;
+    fn update(&mut self) -> Result<(), NonceError> {
+        let counter = self
+            .counters
+            .get_mut(self.level)
+            .ok_or(NonceError::TooDeep)?;
+        *counter = counter.checked_add(1).ok_or(NonceError::TooManyChildren)?;
+        Ok(())
     }
+}
+
+#[test]
+fn test_nonce_bytes_are_little_endian() {
+    let mut nonce = Nonce::new();
+    for _ in 0..0x0102 {
+        nonce.fork().unwrap();
+    }
+    let mut child = nonce.fork().unwrap();
+    child.fork().unwrap();
+    let mut expected = [0; 16];
+    expected[..4].copy_from_slice(&[0x03, 0x01, 0x01, 0x00]);
+    assert_eq!(child.bytes(), expected);
+}
+
+#[test]
+fn nonce_overflow_is_an_error() {
+    let mut nonce = Nonce::new();
+    for _ in 0..u16::MAX {
+        nonce.fork().unwrap();
+    }
+    assert_eq!(nonce.fork(), Err(NonceError::TooManyChildren));
+
+    let mut nonce = Nonce::new();
+    for _ in 0..8 {
+        nonce = nonce.fork().unwrap();
+    }
+    assert_eq!(nonce.fork(), Err(NonceError::TooDeep));
 }

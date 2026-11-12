@@ -29,7 +29,7 @@
 use std::{any::type_name, marker::PhantomData};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 #[cfg(test)]
 use crate::utils::aes_hash::aes_mitccr::clear_set;
@@ -63,16 +63,22 @@ pub(crate) struct Table {
     bit_adaptor: bit_adaptor::Table<AesMiTCCR, Bit16ByteMac, Bit16ByteMac>,
 }
 
+impl Table {
+    pub(crate) fn has_garbled_shape(&self, gid: &GID) -> bool {
+        self.gid == *gid && self.bit_adaptor.has_garbled_shape(gid)
+    }
+}
+
 impl Circuit<Input, InputMac, bool, OutputMac> for Table {
     type Aux = GID;
 
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey,
     ) -> Result<(Self, OutputMacKey), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let gid = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
@@ -106,7 +112,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
         input: &Input,
         input_mac: &InputMac,
     ) -> Result<(bool, OutputMac), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mac_left = if input.right() {
             // If input.right = 1, use input_mac.left as mac_left, i.e.
@@ -129,7 +135,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
         } else {
             // If input.right = 0, derive mac_right by hashing input_mac.right
             // to get hash(input_mac_key.right.encode(0))
-            let dst = bit_adaptor::Table::derive_dst(&self.gid, &nonce);
+            let dst = bit_adaptor::Table::derive_dst(&nonce);
 
             let hash = AesMiTCCR::hash(&dst, &input_mac.right());
 
@@ -143,7 +149,7 @@ impl Circuit<Input, InputMac, bool, OutputMac> for Table {
 #[test]
 fn test_and_circuit() {
     use crate::mac::{Mac, MacKey, Random};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const N: usize = 100;
     const SEED: u64 = 0;
@@ -161,6 +167,7 @@ fn test_and_circuit() {
         let (circuit, output_mac_key) =
             Table::garble(&mut Nonce::new(), &mut rng, Some(gid), &input_mac_key).unwrap();
         clear_set();
+        assert!(circuit.has_garbled_shape(&gid));
 
         let output_mac = circuit
             .evaluate(&mut Nonce::new(), &input, &input_mac)

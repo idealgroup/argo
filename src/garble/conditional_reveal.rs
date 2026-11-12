@@ -3,23 +3,19 @@
 //!
 //! When evaluated on an input != one and its MAC, it returns the `secret`.
 
-use ark_bn254::{Fq, Fq12, g2::Config as G2Config};
-use ark_ec::scalar_mul::glv::GLVConfig;
-use ark_ff::{
-    AdditiveGroup, BigInteger, Field, Fp12, PrimeField, batch_inversion,
-    field_hashers::{DefaultFieldHasher, HashToField},
-};
+use ark_bn254::{Bn254, Fq, Fq12, Fr, G1Affine, G2Affine, g2::Config as G2Config};
+use ark_ec::{AffineRepr, pairing::Pairing, scalar_mul::glv::GLVConfig};
+use ark_ff::{AdditiveGroup, BigInteger, Field, Fp12, PrimeField, batch_inversion};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-#[cfg(test)]
-use crate::garble::groth16_verifier::reset_preprocessed_vk;
 use crate::{
-    garble::groth16_verifier::{self, GarblePreprocessedVk},
+    garble::groth16_verifier,
     mac::{
         MacKey,
         endo::{ENDO_SIZE, Endo, EndoMacKeyFq12, EndoMacKeyG1, EndoScalar, IteratedEndoMacFq12},
     },
     utils::{
+        aes_hash::LEN_PER_BASE_ELEM,
         error::{EvalError, GarbleError},
         try_unwrap_single,
     },
@@ -31,6 +27,17 @@ pub(crate) type InputMac<const KAPPA: usize> = IteratedEndoMacFq12<KAPPA>;
 type InputMacKey<const KAPPA: usize> = [EndoMacKeyFq12; KAPPA];
 
 pub(crate) type Output = Fq;
+
+/// e(G, h)^(2^i) for each bit of Fr, so that e(kG, h) is one `pow_with_table`.
+fn target_powers_of_two(h: G2Affine) -> Vec<Fq12> {
+    let mut power = Bn254::pairing(G1Affine::generator(), h).0;
+    let mut powers = Vec::with_capacity(Fr::MODULUS_BIT_SIZE as usize);
+    for _ in 0..Fr::MODULUS_BIT_SIZE {
+        powers.push(power);
+        power.square_in_place();
+    }
+    powers
+}
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct Table<const KAPPA: usize> {
@@ -45,28 +52,27 @@ impl<const KAPPA: usize> Table<KAPPA> {
     ///
     /// Panics if verifier_key.c == Fq12::ZERO, since `c` must be in the
     /// multiplicative subgroup of Fq12.
-    pub(crate) fn groth16_input_mac_key(
-        verifier_key: &groth16_verifier::VerifierKey,
+    pub(crate) fn groth16_input_mac_key<const N: usize>(
+        verifier_key: &groth16_verifier::VerifierKey<N>,
         pairing_output_mac_key: &[EndoMacKeyFq12; KAPPA],
         c_ec_mac_key: &[EndoMacKeyG1; KAPPA],
-        x_G_output_mac_key: &[EndoMacKeyG1; KAPPA],
+        x_G_output_mac_keys: &[[EndoMacKeyG1; KAPPA]; N],
     ) -> Result<InputMacKey<KAPPA>, GarbleError> {
-        let GarblePreprocessedVk {
-            h1_target_pow_2,
-            h2_target_pow_2,
-            ..
-        } = verifier_key.garble_preprocess();
-
-        #[cfg(test)]
-        reset_preprocessed_vk();
+        let h1_target_pow_2 = target_powers_of_two(verifier_key.H1);
+        // With no garbled inputs there is no e(xG.k, H2) term.
+        let h2_target_pow_2 = if N == 0 {
+            Vec::new()
+        } else {
+            target_powers_of_two(verifier_key.H2)
+        };
 
         let mut key = Vec::with_capacity(pairing_output_mac_key.len());
 
         // e(A,B) e(C, H_1) = c^{-1}
-        for ((AB, C), x_G) in pairing_output_mac_key
+        for (i, (AB, C)) in pairing_output_mac_key
             .iter()
             .zip(c_ec_mac_key.iter())
-            .zip(x_G_output_mac_key.iter())
+            .enumerate()
         {
             // All these MAC keys use the same phi
             let phi: EndoScalar<G2Config> = C.phi.clone().into();
@@ -74,48 +80,52 @@ impl<const KAPPA: usize> Table<KAPPA> {
                 .k_scalar
                 .ok_or(GarbleError::MissingKScalar("C"))?
                 .into_bigint();
-            let xG_k_scalar = x_G
-                .k_scalar
-                .ok_or(GarbleError::MissingKScalar("x_G"))?
-                .into_bigint();
 
             // e(G, H1)^{C_k_scalar}
             // This unwrap cannot fail because there are enough
             // `h1_target_pow_2` for Fr.
             let C_k_H1 = Fq12::pow_with_table(&h1_target_pow_2, C_k_scalar).unwrap();
 
-            // e(G, H2)^{xG_k_scalar}
-            // This unwrap cannot fail because there are enough
-            // `h1_target_pow_2` for Fr.
-            let xG_k_H2 = Fq12::pow_with_table(&h2_target_pow_2, xG_k_scalar).unwrap();
+            // e(G, H2)^{Σ_l xG_l_k_scalar}
+            let xG_k_H2 = if N == 0 {
+                Fq12::ONE
+            } else {
+                let mut xG_k_scalar = Fr::ZERO;
+                for keys in x_G_output_mac_keys {
+                    xG_k_scalar += keys[i].k_scalar.ok_or(GarbleError::MissingKScalar("x_G"))?;
+                }
+                // This unwrap cannot fail because there are enough
+                // `h2_target_pow_2` for Fr.
+                Fq12::pow_with_table(&h2_target_pow_2, xG_k_scalar.into_bigint()).unwrap()
+            };
 
             // e(C.k, H1) e(xG.k, H2)
             let k = C_k_H1 * xG_k_H2;
 
             #[cfg(test)]
             {
-                use ark_bn254::Bn254;
-                use ark_ec::pairing::Pairing;
+                use ark_bn254::{Bn254, G1Projective};
+                use ark_ec::{CurveGroup, pairing::Pairing};
 
                 assert_eq!(C_k_H1, Bn254::pairing(C.k, verifier_key.H1).0);
-                assert_eq!(xG_k_H2, Bn254::pairing(x_G.k, verifier_key.H2).0);
-
+                let xG_k: G1Projective = x_G_output_mac_keys.iter().map(|keys| keys[i].k).sum();
                 assert_eq!(
                     k,
-                    Bn254::multi_pairing(vec![C.k, x_G.k], vec![verifier_key.H1, verifier_key.H2])
-                        .0
+                    Bn254::multi_pairing(
+                        vec![C.k, xG_k.into_affine()],
+                        vec![verifier_key.H1, verifier_key.H2]
+                    )
+                    .0
                 );
             }
 
             // c^{p^(2phi + 6)} = c^{-p^(2phi)}
             // This has the effect of multiplying the MAC'd value by c
-            // This panics if `c` = Fq12::ZERO, since `c` must be in the
-            // Fq12 multiplicative subgroup.
             let c_term = phi.endo(
                 verifier_key
                     .c
                     .inverse()
-                    .expect("verifier_key.c must be in the Fq12 multiplicative subgroup."),
+                    .ok_or(GarbleError::DegenerateVerifierKey)?,
             );
             let k = k * AB.k * c_term;
 
@@ -126,9 +136,8 @@ impl<const KAPPA: usize> Table<KAPPA> {
             });
         }
 
-        // This unwrap cannot fail because `pairing_output_mac_key`,
-        // `c_ec_mac_key`, `x_G_output_mac_key` are fixed arrays of size
-        // `KAPPA`.
+        // This unwrap cannot fail because `pairing_output_mac_key` and
+        // `c_ec_mac_key` are fixed arrays of size `KAPPA`.
         Ok(key.try_into().unwrap_or_else(|_| panic!()))
     }
 
@@ -138,9 +147,39 @@ impl<const KAPPA: usize> Table<KAPPA> {
         I::IntoIter: DoubleEndedIterator,
     {
         let packed_phis = EndoScalar::<C>::pack(phis);
-        let hasher = <DefaultFieldHasher<blake3::Hasher> as HashToField<Fq>>::new(&[]);
-        hasher.hash_to_field::<1>(&packed_phis.into_bigint().to_bytes_le())[0]
+        hash_to_fq(&packed_phis.into_bigint().to_bytes_le())
     }
+}
+
+/// expand_message_xmd with blake3 and an empty DST, reduced into `Fq`. This is
+/// ark-ff's `DefaultFieldHasher<blake3::Hasher>`, whose zero pad is
+/// `LEN_PER_BASE_ELEM` bytes rather than the hash block size.
+fn hash_to_fq(msg: &[u8]) -> Fq {
+    // The empty DST, then its length.
+    const DST: [u8; 1] = [0];
+    let b0 = blake3::Hasher::new()
+        .update(&[0; LEN_PER_BASE_ELEM])
+        .update(msg)
+        .update(&(LEN_PER_BASE_ELEM as u16).to_be_bytes())
+        .update(&[0])
+        .update(&DST)
+        .finalize();
+    let b1 = blake3::Hasher::new()
+        .update(b0.as_bytes())
+        .update(&[1])
+        .update(&DST)
+        .finalize();
+    let b0_xor_b1: [u8; 32] = std::array::from_fn(|i| b0.as_bytes()[i] ^ b1.as_bytes()[i]);
+    let b2 = blake3::Hasher::new()
+        .update(&b0_xor_b1)
+        .update(&[2])
+        .update(&DST)
+        .finalize();
+
+    let mut uniform_bytes = [0; 64];
+    uniform_bytes[..32].copy_from_slice(b1.as_bytes());
+    uniform_bytes[32..].copy_from_slice(b2.as_bytes());
+    Fq::from_be_bytes_mod_order(&uniform_bytes[..LEN_PER_BASE_ELEM])
 }
 
 impl<const KAPPA: usize> Table<KAPPA> {
@@ -158,11 +197,13 @@ impl<const KAPPA: usize> Table<KAPPA> {
     ///
     /// If none of the InputMac's matches the one_mac at a given `i`, we can
     /// recover phi_i using one of the InputMac's.
+    ///
+    /// Returns `None` when the input is one, so nothing is revealed.
     pub(crate) fn evaluate(
         &self,
         input: &Input,
         input_macs: &[InputMac<KAPPA>],
-    ) -> Result<Output, EvalError> {
+    ) -> Result<Option<Output>, EvalError> {
         let phis = EndoScalar::<G2Config>::iter();
         let input_exp = if *input == Fq12::ONE {
             vec![Fq12::ONE]
@@ -221,12 +262,12 @@ impl<const KAPPA: usize> Table<KAPPA> {
         };
 
         if *input == Fq12::ONE && phis.iter().all(|phi| matches!(phi, EndoScalar::Zero(_))) {
-            return Ok(Fq::ZERO);
+            return Ok(None);
         }
 
         // Recover the secret using the phis.
         let secret = self.enc_s - Self::hash_packed_phis(phis);
-        Ok(secret)
+        Ok(Some(secret))
     }
 }
 
@@ -254,7 +295,7 @@ fn test_conditional_reveal_valid() {
 
     let output = table.evaluate(&input, &[input_mac]).unwrap();
 
-    assert_eq!(output, Fq::ZERO);
+    assert_eq!(output, None);
 }
 
 #[test]
@@ -281,14 +322,11 @@ fn test_conditional_reveal_invalid() {
 
     let output = table.evaluate(&input, &[input_mac]).unwrap();
 
-    assert_eq!(output, secret);
+    assert_eq!(output, Some(secret));
 }
 
 #[test]
-fn test_preprocessed_pow_two() {
-    use crate::garble::groth16_verifier::{VerifierKey, reset_preprocessed_vk};
-    use ark_bn254::{Bn254, Fr, G1Affine, G2Affine};
-    use ark_ec::{AffineRepr, pairing::Pairing};
+fn test_target_powers_of_two() {
     use ark_ff::UniformRand;
     use ark_std::rand::{SeedableRng, rngs::StdRng};
 
@@ -296,27 +334,10 @@ fn test_preprocessed_pow_two() {
 
     let mut rng = StdRng::seed_from_u64(SEED);
 
-    let verifier_key = VerifierKey {
-        G1: G1Affine::rand(&mut rng),
-        H1: G2Affine::rand(&mut rng),
-        H2: G2Affine::rand(&mut rng),
-        c: Bn254::pairing(G1Affine::rand(&mut rng), G2Affine::generator()).0,
-    };
-
-    let GarblePreprocessedVk {
-        h1_target_pow_2,
-        h2_target_pow_2,
-        ..
-    } = verifier_key.garble_preprocess();
-
+    let h = G2Affine::rand(&mut rng);
     let scalar = Fr::rand(&mut rng);
     let point = G1Affine::generator() * scalar;
 
-    let h1_pairing = Fq12::pow_with_table(&h1_target_pow_2, scalar.into_bigint()).unwrap();
-    assert_eq!(h1_pairing, Bn254::pairing(point, verifier_key.H1).0);
-
-    let h2_pairing = Fq12::pow_with_table(&h2_target_pow_2, scalar.into_bigint()).unwrap();
-    assert_eq!(h2_pairing, Bn254::pairing(point, verifier_key.H2).0);
-
-    reset_preprocessed_vk();
+    let pairing = Fq12::pow_with_table(&target_powers_of_two(h), scalar.into_bigint()).unwrap();
+    assert_eq!(pairing, Bn254::pairing(point, h).0);
 }

@@ -18,17 +18,31 @@ use crate::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{Bits, BoundedVec},
     },
 };
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Debug)]
-pub(crate) struct Table<F>(Vec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<F>>>)
+pub(crate) struct Table<F>(
+    BoundedVec<bit_adaptor::Table<AesCtr, Bit16ByteMac, BitGroupMac<F>>, Bits<F>>,
+)
 where
     F: Field + NumBits + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder;
+
+impl<F> Table<F>
+where
+    F: Field + NumBits + FromBits<bool, F> + Random,
+    F::BasePrimeField: FromLeBytesModOrder,
+{
+    /// Whether there is one well-formed bit adaptor per bit of `F`.
+    pub(crate) fn has_garbled_shape(&self) -> bool {
+        self.0.len() == F::NUM_BITS && self.0.iter().all(|table| table.has_garbled_shape())
+    }
+}
 
 pub(crate) type Input<F> = F;
 pub(crate) type InputMac<F> = bytes::DigitMac<F>;
@@ -48,11 +62,11 @@ where
     #[inline(never)]
     fn garble(
         parent_nonce: &mut Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &InputMacKey<F>,
     ) -> Result<(Self, OutputMacKey<F>), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mut bit_adaptor_tables = Vec::with_capacity(F::NUM_BITS);
         let mut output_mac_keys = Vec::with_capacity(F::NUM_BITS);
@@ -64,7 +78,7 @@ where
             output_mac_keys.push(output_mac_key);
         }
 
-        Ok((Self(bit_adaptor_tables), output_mac_keys.into()))
+        Ok((Self(bit_adaptor_tables.into()), output_mac_keys.into()))
     }
 
     fn evaluate(
@@ -73,7 +87,7 @@ where
         input: &F,
         input_mac: &InputMac<F>,
     ) -> Result<(F, OutputMac<F>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let input_bits = input.to_bits();
         let mut bit_group_macs = Vec::with_capacity(F::NUM_BITS);
@@ -98,7 +112,7 @@ where
     F: Field + NumBits + ToBits + FromBits<F, F> + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder,
 {
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     use crate::{mac::MacKey, utils::aes_hash::aes_ctr::clear_set};
 
@@ -117,6 +131,7 @@ where
     let (table, output_mac_key) =
         Table::garble(&mut Nonce::new(), &mut rng, Some(phi), &input_mac_key).unwrap();
     clear_set();
+    assert!(table.has_garbled_shape());
 
     let expected_output_mac = output_mac_key.encode(&output);
     let evaluated_output_mac = table

@@ -1,31 +1,35 @@
 use std::{marker::PhantomData, ops::Neg};
 
-use ark_bn254::{Bn254, Fq12, g1, g2};
+use ark_bn254::{Fq12, g1, g2};
 use ark_ec::{
-    pairing::Pairing,
     scalar_mul::glv::GLVConfig,
     short_weierstrass::{Affine, SWCurveConfig},
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use crate::mac::{ddh::DDHMac, endo::EndoMac, group::GroupMac};
+use crate::{
+    mac::{ddh::DDHMac, endo::EndoMac, group::GroupMac},
+    utils::{error::EvalError, group::checked_multi_pairing},
+};
 
 pub(crate) mod pairing;
 pub(crate) mod scalar_mul;
 
 pub(crate) trait BilinearOp<G1, G2: SWCurveConfig> {
-    fn bilinear_op(g1: G1, g2: Affine<G2>) -> Self;
+    fn bilinear_op(g1: G1, g2: Affine<G2>) -> Result<Self, EvalError>
+    where
+        Self: Sized;
 }
 
 impl<C: SWCurveConfig> BilinearOp<C::ScalarField, C> for Affine<C> {
-    fn bilinear_op(scalar: C::ScalarField, curve_point: Affine<C>) -> Self {
-        (curve_point * scalar).into()
+    fn bilinear_op(scalar: C::ScalarField, curve_point: Affine<C>) -> Result<Self, EvalError> {
+        Ok((curve_point * scalar).into())
     }
 }
 
 impl BilinearOp<Affine<g1::Config>, g2::Config> for Fq12 {
-    fn bilinear_op(g1: Affine<g1::Config>, g2: Affine<g2::Config>) -> Self {
-        Bn254::pairing(g1, g2).0
+    fn bilinear_op(g1: Affine<g1::Config>, g2: Affine<g2::Config>) -> Result<Self, EvalError> {
+        checked_multi_pairing([g1], [g2])
     }
 }
 
@@ -73,15 +77,16 @@ where
         input: &G1,
         input_mac: &GroupMac<G1>,
         ddh_mac: &DDHMac<G2, KAPPA>,
-    ) -> Vec<EndoMac<G2, Gt>> {
-        self.T
+    ) -> Result<[EndoMac<G2, Gt>; KAPPA], EvalError> {
+        let macs = self
+            .T
             .iter()
             .zip(ddh_mac.0.iter())
             .map(|(t, s)| {
-                EndoMac::from(
-                    Gt::bilinear_op(**input_mac, *t).target_op(Gt::bilinear_op(*input, *s)),
-                )
+                let mac = Gt::bilinear_op(**input_mac, *t)?.target_op(Gt::bilinear_op(*input, *s)?);
+                Ok(EndoMac::from(mac))
             })
-            .collect()
+            .collect::<Result<Vec<_>, EvalError>>()?;
+        macs.try_into().map_err(|_| EvalError::MalformedTable)
     }
 }

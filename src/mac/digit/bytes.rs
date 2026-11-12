@@ -1,7 +1,7 @@
 //! DigitMac of a field element, where each bit is encoded as a Bit16ByteMac.
 
 use ark_ff::{AdditiveGroup, Field};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{Nonce, bit_adaptor::DeriveOutputMacKey},
@@ -31,7 +31,7 @@ where
     type Key = DigitMacKey<G>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> G::Scalar {
+    fn random_input(rng: &mut impl CryptoRngCore) -> G::Scalar {
         use ark_std::UniformRand;
         G::Scalar::rand(rng)
     }
@@ -63,7 +63,7 @@ where
         .unwrap()
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let mut bit_mac_keys = Vec::with_capacity(G::Scalar::NUM_BITS);
         for _ in 0..G::Scalar::NUM_BITS {
             bit_mac_keys.push(Bit16ByteMacKey::random_key(rng));

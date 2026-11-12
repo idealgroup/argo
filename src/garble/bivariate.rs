@@ -6,9 +6,9 @@ use ark_ec::{
     AffineRepr,
     short_weierstrass::{Affine, SWCurveConfig},
 };
-use ark_ff::Field;
+use ark_ff::{AdditiveGroup, Field};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::rngs::StdRng;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{Circuit, digit_adaptor},
@@ -17,13 +17,18 @@ use crate::{
         bits::{FromBits, NumBits, ToBits},
         error::{EvalError, GarbleError},
         group::FromLeBytesModOrder,
+        serde::{AtMost, BoundedVec},
     },
 };
 
 #[cfg(test)]
 use crate::{garble::Nonce, utils::aes_hash::aes_ctr::clear_set};
 #[cfg(test)]
-use ark_std::rand::SeedableRng;
+use ark_std::rand::{SeedableRng, rngs::StdRng};
+
+/// The most digit adaptor tables `garble` gives a polynomial Argo uses: five,
+/// for the curve equations and the y coordinate.
+const MAX_TABLES: usize = 5;
 
 /// Powers of a monomial where (i, j) represents x^i y^j.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, CanonicalDeserialize, CanonicalSerialize)]
@@ -34,18 +39,18 @@ impl Monomial {
     #[inline]
     fn weight(&self) -> usize {
         // The diagonal
-        let k = self.0 + self.1;
+        let k = self.0 as usize + self.1 as usize;
 
-        ((k * (k + 1) / 2) + self.1) as usize
+        k * (k + 1) / 2 + self.1 as usize
     }
 
     #[inline]
-    pub(crate) fn new(x: u8, y: u8) -> Self {
+    pub(crate) const fn new(x: u8, y: u8) -> Self {
         Self(x, y)
     }
 
     #[inline]
-    pub(crate) fn constant() -> Self {
+    pub(crate) const fn constant() -> Self {
         Self(0, 0)
     }
 }
@@ -64,6 +69,32 @@ impl Ord for Monomial {
 
 /// true => x, false => y
 type XY = bool;
+
+/// The `(XY, Monomial)` of each digit adaptor table that `Table::garble`
+/// emits, in order, for a polynomial with these monomials. Garbling reduces
+/// each monomial by one degree in x (or else y), which can add lower ones.
+fn table_monomials(monomials: &[Monomial]) -> Vec<(XY, Monomial)> {
+    let len = monomials.iter().map(|m| m.weight() + 1).max().unwrap_or(0);
+    let mut present = vec![None; len];
+    for monomial in monomials {
+        present[monomial.weight()] = Some(*monomial);
+    }
+
+    let mut tables = Vec::new();
+    for idx in (0..len).rev() {
+        let Some(Monomial(i, j)) = present[idx] else {
+            continue;
+        };
+        let (xy, monomial) = match (i, j) {
+            (0, 0) => continue,
+            (0, j) => (false, Monomial(0, j - 1)),
+            (i, j) => (true, Monomial(i - 1, j)),
+        };
+        present[monomial.weight()] = Some(monomial);
+        tables.push((xy, monomial));
+    }
+    tables
+}
 
 /// Bivariate polynomial in coefficient form, mapping from monomial to
 /// coefficient.
@@ -167,11 +198,12 @@ where
     C: AffineRepr,
     C::BaseField: Field,
 {
-    /// # Panics
-    ///
-    /// Panics if `value` is the point at infinity.
+    /// The identity has no affine coordinates and becomes (0, 0), which is on
+    /// neither BN254 G1 nor its twist, so evaluation reveals the secret for it.
     fn from(value: C) -> Self {
-        let (x, y) = value.xy().unwrap();
+        let (x, y) = value
+            .xy()
+            .unwrap_or((C::BaseField::ZERO, C::BaseField::ZERO));
         Self { x, y }
     }
 }
@@ -217,7 +249,7 @@ where
         }
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         Self {
             x: bytes::DigitMacKey::random_key(rng),
             y: bytes::DigitMacKey::random_key(rng),
@@ -232,7 +264,7 @@ where
     type Key = InputMacKey<F>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Input<F> {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Input<F> {
         Input {
             x: F::rand(rng),
             y: F::rand(rng),
@@ -246,8 +278,27 @@ where
     F: Field + NumBits + FromBits<bool, F> + Random,
     F::BasePrimeField: FromLeBytesModOrder,
 {
-    constant: F,
-    tables: Vec<(XY, Monomial, digit_adaptor::Table<F>)>,
+    pub(crate) constant: F,
+    pub(crate) tables: BoundedVec<(XY, Monomial, digit_adaptor::Table<F>), AtMost<MAX_TABLES>>,
+}
+
+impl<F> Table<F>
+where
+    F: Field + NumBits + FromBits<bool, F> + Random,
+    F::BasePrimeField: FromLeBytesModOrder,
+{
+    /// Whether this is the shape `garble` gives a polynomial with `monomials`.
+    pub(crate) fn has_garbled_shape(&self, monomials: &[Monomial]) -> bool {
+        let expected = table_monomials(monomials);
+        self.tables.len() == expected.len()
+            && self
+                .tables
+                .iter()
+                .zip(expected)
+                .all(|((xy, monomial, table), expected)| {
+                    (*xy, *monomial) == expected && table.has_garbled_shape()
+                })
+    }
 }
 
 impl<F> Circuit<Input<F>, InputMac<F>, F, IdentityMac<F>> for Table<F>
@@ -259,11 +310,11 @@ where
 
     fn garble(
         parent_nonce: &mut super::Nonce,
-        rng: &mut StdRng,
+        rng: &mut impl CryptoRngCore,
         aux: Option<Self::Aux>,
         input_mac_key: &<InputMac<F> as Mac<Input<F>>>::Key,
     ) -> Result<(Self, <IdentityMac<F> as Mac<F>>::Key), GarbleError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let poly = aux
             .ok_or_else(|| GarbleError::AuxError(type_name::<Self::Aux>(), type_name::<Self>()))?;
@@ -300,7 +351,13 @@ where
             tables.push((xy, monomial, table));
         }
 
-        Ok((Self { constant, tables }, IdentityMacKey))
+        Ok((
+            Self {
+                constant,
+                tables: tables.into(),
+            },
+            IdentityMacKey,
+        ))
     }
 
     fn evaluate(
@@ -309,7 +366,7 @@ where
         input: &Input<F>,
         input_mac: &InputMac<F>,
     ) -> Result<(F, IdentityMac<F>), EvalError> {
-        let mut nonce = parent_nonce.fork();
+        let mut nonce = parent_nonce.fork()?;
 
         let mut poly = Poly::default();
         for (xy, monomial, table) in self.tables.iter() {
@@ -330,7 +387,7 @@ where
 }
 
 #[cfg(test)]
-fn test_biquadratic<F>(coeffs: [Option<F>; 6], rng: &mut StdRng)
+fn test_biquadratic<F>(coeffs: [Option<F>; 6], rng: &mut impl CryptoRngCore)
 where
     F: Field + NumBits + FromBits<bool, F> + Random + ToBits + FromBits<F, F>,
     F::BasePrimeField: FromLeBytesModOrder,
@@ -343,6 +400,8 @@ where
         .unwrap()
         .0;
     clear_set();
+    let monomials: Vec<_> = poly.iter().filter_map(|(monomial, _)| *monomial).collect();
+    assert!(garbling_table.has_garbled_shape(&monomials));
 
     let input = <InputMac<F> as Mac<Input<F>>>::random_input(rng);
     let input_mac = input_mac_key.encode(&input);

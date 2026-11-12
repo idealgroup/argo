@@ -1,6 +1,11 @@
 #[cfg(test)]
-use std::collections::{BTreeMap, BTreeSet};
-use std::{cell::RefCell, rc::Rc};
+use std::collections::BTreeSet;
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    marker::PhantomData,
+    rc::Rc,
+};
 
 use aes::{
     Aes128, Block,
@@ -9,19 +14,45 @@ use aes::{
 use ark_ec::AdditiveGroup;
 use ark_ff::{Field, PrimeField};
 use arrayvec::ArrayVec;
-use rustc_hash::FxHashMap;
 
 use crate::{
     garble::Nonce,
     utils::{
         aes_hash::{AES_BLOCK_SIZE, Hash, LEN_PER_BASE_ELEM},
+        error::NonceError,
         group::FromLeBytesModOrder,
     },
 };
 
 thread_local! {
-    static AES_INSTANCES: RefCell<FxHashMap<[u8; 16], Rc<Aes128>>> =
-        RefCell::new(FxHashMap::default());
+    // The keys are labels a garbler chooses, so a lookup must not cost more
+    // when they collide under some hash.
+    static AES_INSTANCES: RefCell<BTreeMap<[u8; 16], Rc<Aes128>>> =
+        const { RefCell::new(BTreeMap::new()) };
+    static AES_SCOPES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Caches AES key schedules on this thread until the outermost scope ends.
+/// The keys are labels of one garbling, so a later garbling can't reuse them.
+pub(crate) struct AesCacheScope(PhantomData<Rc<()>>);
+
+impl AesCacheScope {
+    pub(crate) fn new() -> Self {
+        AES_SCOPES.with(|scopes| scopes.set(scopes.get() + 1));
+        Self(PhantomData)
+    }
+}
+
+impl Drop for AesCacheScope {
+    fn drop(&mut self) {
+        let scopes = AES_SCOPES.with(|scopes| {
+            scopes.set(scopes.get() - 1);
+            scopes.get()
+        });
+        if scopes == 0 {
+            AES_INSTANCES.with(|instances| instances.take());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -29,14 +60,12 @@ pub(crate) struct AesCtr;
 
 impl AesCtr {
     pub(crate) fn get_instance(key: &[u8; 16]) -> Rc<Aes128> {
-        AES_INSTANCES.with(|instances| {
-            Rc::clone(
-                instances
-                    .borrow_mut()
-                    .entry(*key)
-                    .or_insert_with(|| Rc::new(Aes128::new(&(*key).into()))),
-            )
-        })
+        let new = || Rc::new(Aes128::new(&(*key).into()));
+        if AES_SCOPES.with(Cell::get) == 0 {
+            return new();
+        }
+        AES_INSTANCES
+            .with(|instances| Rc::clone(instances.borrow_mut().entry(*key).or_insert_with(new)))
     }
 }
 
@@ -63,7 +92,10 @@ impl AesCtr {
     /// # Panics
     ///
     /// Panics if F::extension_degree() > 2
-    pub(crate) fn hash_to_field<F>(value: [u8; AES_BLOCK_SIZE], parent_nonce: &Nonce) -> F
+    pub(crate) fn hash_to_field<F>(
+        value: [u8; AES_BLOCK_SIZE],
+        parent_nonce: &Nonce,
+    ) -> Result<F, NonceError>
     where
         F: Field,
         F::BasePrimeField: FromLeBytesModOrder,
@@ -87,7 +119,7 @@ impl AesCtr {
 
         for elem in base_prime_field_elems.iter_mut() {
             for i in 0..num_blocks_per_base_elem {
-                let nonce = parent_nonce.fork();
+                let nonce = parent_nonce.fork()?;
                 let mut block = Block::from(nonce.bytes());
                 aes.encrypt_block(&mut block);
 
@@ -100,7 +132,7 @@ impl AesCtr {
 
         // This unwrap cannot fail because `base_prime_field_elems` is length
         // `m = F::extension_degree()`.
-        F::from_base_prime_field_elems(base_prime_field_elems).unwrap()
+        Ok(F::from_base_prime_field_elems(base_prime_field_elems).unwrap())
     }
 
     /// The number of bytes of this field element as a multiple of AES blocks.
@@ -110,7 +142,7 @@ impl AesCtr {
     /// Panics if the number of bytes is not a multiple of AES_BLOCK_SIZE.
     pub(crate) fn num_blocks<F: Field>() -> usize {
         let base_prime_field_num_bytes = F::BasePrimeField::MODULUS_BIT_SIZE.div_ceil(8) as usize;
-        assert_eq!(base_prime_field_num_bytes & AES_BLOCK_SIZE, 0);
+        assert_eq!(base_prime_field_num_bytes % AES_BLOCK_SIZE, 0);
         let num_blocks = base_prime_field_num_bytes / AES_BLOCK_SIZE;
 
         F::extension_degree() as usize * num_blocks
@@ -130,4 +162,30 @@ pub(crate) fn clear_set() {
     COUNTERS_MAP.with(|map| {
         map.borrow_mut().clear();
     });
+}
+
+#[cfg(test)]
+pub(crate) fn cached_instances() -> usize {
+    AES_INSTANCES.with(|instances| instances.borrow().len())
+}
+
+#[test]
+fn test_aes_cache_scope() {
+    let hash = |byte| {
+        AesCtr::hash(&[byte; 16], &[0; 16]);
+    };
+
+    hash(0);
+    assert_eq!(cached_instances(), 0);
+
+    let outer = AesCacheScope::new();
+    hash(1);
+    {
+        let _inner = AesCacheScope::new();
+        hash(2);
+    }
+    assert_eq!(cached_instances(), 2);
+    drop(outer);
+    assert_eq!(cached_instances(), 0);
+    clear_set();
 }

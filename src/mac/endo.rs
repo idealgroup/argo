@@ -7,15 +7,16 @@ use std::{marker::PhantomData, ops::Neg};
 
 use ark_bn254::{Bn254, Fq, Fq12, Fr, g1, g2};
 use ark_ec::{
-    AdditiveGroup, CurveGroup, PrimeGroup,
+    AdditiveGroup, AffineRepr, CurveGroup, PrimeGroup,
     pairing::Pairing,
     scalar_mul::glv::GLVConfig,
     short_weierstrass::{Affine, Projective},
 };
 use ark_ff::{BigInt, Field, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{Rng, rngs::StdRng};
+use ark_std::rand::Rng;
 use derive_more::Deref;
+use rand_core::CryptoRngCore;
 
 use crate::{
     garble::{bivariate::Poly, groth16_verifier::KAPPA_B},
@@ -48,8 +49,10 @@ impl<G> Default for EndoScalar<G> {
 }
 
 impl<G: GLVConfig> Random for EndoScalar<G> {
-    fn random(rng: &mut StdRng) -> EndoScalar<G> {
-        let exp = rng.gen_range(0..ENDO_SIZE);
+    /// Draws a `u64`: a `usize` draw takes a `u32` on 32-bit targets, which
+    /// would garble a different instance there from the same seed.
+    fn random(rng: &mut impl CryptoRngCore) -> EndoScalar<G> {
+        let exp = rng.gen_range(0..ENDO_SIZE as u64);
         Self::from_u8(exp as u8)
     }
 }
@@ -126,6 +129,7 @@ where
     fn endo(&self, point: Affine<G>) -> Affine<G> {
         match self {
             Self::NegInf(_) => Affine::identity(),
+            _ if point.is_zero() => point,
             _ => {
                 let phi = Self::omega_base().pow([self.as_u8() as u64]);
                 let (a, b) = {
@@ -134,11 +138,7 @@ where
                     (phi_sq.square(), phi_sq * phi)
                 };
 
-                Affine {
-                    x: a * point.x,
-                    y: b * point.y,
-                    infinity: point.infinity,
-                }
+                Affine::new_unchecked(a * point.x, b * point.y)
             }
         }
     }
@@ -291,7 +291,11 @@ impl<G: GLVConfig> EndoScalar<G> {
     }
 
     fn mod_sum(endoscalars: &[Self]) -> Self {
-        Self::from_u8(endoscalars.iter().map(|phi| phi.as_u8()).sum::<u8>() % (ENDO_SIZE as u8))
+        let sum = endoscalars
+            .iter()
+            .map(|phi| phi.as_u8() as usize)
+            .sum::<usize>();
+        Self::from_u8((sum % ENDO_SIZE) as u8)
     }
 }
 
@@ -300,20 +304,17 @@ where
     G: GLVConfig + Clone,
 {
     fn neg(&self) -> Self {
-        match self {
-            Self::NegInf(_) => self.clone(),
-            _ => {
-                let modulus = ENDO_SIZE as u8;
-                Self::from_u8((modulus - self.as_u8()) % modulus)
-            }
-        }
+        let modulus = ENDO_SIZE as u8;
+        Self::from_u8((modulus - self.as_u8()) % modulus)
     }
 
     fn checksum(endoscalars: &[Self]) -> Self {
         Self::neg(&Self::mod_sum(endoscalars))
     }
 
-    pub(crate) fn sample_endoscalars_with_checksum<const N: usize>(rng: &mut StdRng) -> Vec<Self> {
+    pub(crate) fn sample_endoscalars_with_checksum<const N: usize>(
+        rng: &mut impl CryptoRngCore,
+    ) -> Vec<Self> {
         let mut res = vec![Self::Zero(PhantomData); N];
         res.iter_mut()
             .take(N - 1)
@@ -418,7 +419,7 @@ where
     type Key = EndoMacKey<G, Affine<G>>;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Affine<G> {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Affine<G> {
         use ark_std::rand::{distributions::Standard, prelude::Distribution as _};
 
         Standard.sample(rng)
@@ -428,7 +429,7 @@ where
 impl RandomFromPhi<Affine<g1::Config>, EndoMacG1> for EndoMacKeyG1 {
     type Phi = EndoScalar<g1::Config>;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &EndoScalar<g1::Config>) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &EndoScalar<g1::Config>) -> Self {
         let k_scalar = Fr::rand(rng);
         let k = (Projective::<g1::Config>::generator() * k_scalar).into_affine();
 
@@ -443,7 +444,7 @@ impl RandomFromPhi<Affine<g1::Config>, EndoMacG1> for EndoMacKeyG1 {
 impl RandomFromPhi<Affine<g2::Config>, EndoMacG2> for EndoMacKeyG2 {
     type Phi = EndoScalar<g2::Config>;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &EndoScalar<g2::Config>) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &EndoScalar<g2::Config>) -> Self {
         let k = get_curve_point_not_in_g2(rng);
 
         Self {
@@ -457,7 +458,7 @@ impl RandomFromPhi<Affine<g2::Config>, EndoMacG2> for EndoMacKeyG2 {
 impl RandomFromPhi<Fq12, EndoMacFq12> for EndoMacKeyFq12 {
     type Phi = EndoScalar<g2::Config>;
 
-    fn random_from_phi(rng: &mut StdRng, phi: &EndoScalar<g2::Config>) -> Self {
+    fn random_from_phi(rng: &mut impl CryptoRngCore, phi: &EndoScalar<g2::Config>) -> Self {
         Self {
             phi: phi.clone(),
             k_scalar: None,
@@ -489,7 +490,7 @@ where
         unimplemented!()
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let phi = EndoScalar::random(rng);
         Self::random_from_phi(rng, &phi)
     }
@@ -502,7 +503,7 @@ where
     type Key = EndoMacKeyFq12;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Fq12 {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Fq12 {
         use ark_std::rand::{distributions::Standard, prelude::Distribution as _};
 
         Standard.sample(rng)
@@ -526,7 +527,7 @@ where
         unimplemented!()
     }
 
-    fn random_key(rng: &mut StdRng) -> Self {
+    fn random_key(rng: &mut impl CryptoRngCore) -> Self {
         let phi = EndoScalar::random(rng);
         Self::random_from_phi(rng, &phi)
     }
@@ -564,7 +565,7 @@ fn test_gt_mac_commute() {
     use ark_bn254::g1::Config as G;
     use ark_bn254::{Bn254, G1Affine, G2Affine};
     use ark_ec::{AffineRepr, pairing::Pairing};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     const SEED: u64 = 0;
 
@@ -583,4 +584,42 @@ fn test_gt_mac_commute() {
     let gt_mac = gt_mac_key.encode(&gt_point);
 
     assert_eq!(*gt_mac, Bn254::pairing(*g1_mac, G2Affine::generator()).0)
+}
+
+#[test]
+/// Erasing any digit, including an erased 1 (whose recovery computes -6) and
+/// sums that overflow u8, must recover the original checksummed array.
+fn test_checksum_single_erasure() {
+    type E = EndoScalar<g2::Config>;
+
+    for digit in 0..ENDO_SIZE as u8 {
+        let mut original = vec![E::from_u8(6); KAPPA_B - 1];
+        original[0] = E::from_u8(digit);
+        original.push(E::checksum(&original));
+
+        for missing in 0..KAPPA_B {
+            let mut erased: Vec<_> = original
+                .iter()
+                .map(|phi| Some(phi.as_u8() as usize))
+                .collect();
+            erased[missing] = None;
+            assert!(
+                E::decode(&erased).unwrap() == original,
+                "digit {digit}, erased {missing}"
+            );
+        }
+    }
+}
+
+/// Each draw takes whole `u64`s from the RNG on every target, so a seed
+/// garbles the same instance on 32-bit and 64-bit platforms.
+#[test]
+fn endoscalar_draws_take_u64s() {
+    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+
+    let mut rng = ChaCha20Rng::from_seed([0; 32]);
+    for draw in 0..100 {
+        EndoScalar::<g1::Config>::random(&mut rng);
+        assert!(rng.get_word_pos() % 2 == 0, "draw {draw}");
+    }
 }

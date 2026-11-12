@@ -14,6 +14,38 @@ pub enum GarbleError {
     MissingDST,
     #[error("Missing k_scalar in {0} EndoMacKey.")]
     MissingKScalar(&'static str),
+    #[error("The verifier key's pairing constant is zero.")]
+    DegenerateVerifierKey,
+    #[error(transparent)]
+    Nonce(#[from] NonceError),
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceError {
+    #[error("A table has more than u16::MAX sub-tables.")]
+    TooManyChildren,
+    #[error("The tables nest more than 8 levels deep.")]
+    TooDeep,
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierKeyError {
+    #[error("The verifying key has no gamma_abc_g1 constant term.")]
+    MissingConstantTerm,
+    #[error("Expected {expected} public inputs, got {actual}.")]
+    PublicInputLength { expected: usize, actual: usize },
+    #[error("Expected {expected} garbled public inputs, got {actual}.")]
+    GarbledInputCount { expected: usize, actual: usize },
+    #[error("The verifying key's pairing constant is zero.")]
+    DegenerateKey,
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputError {
+    #[error("Expected {expected} input bits, got {actual}.")]
+    BitCount { expected: usize, actual: usize },
+    #[error("Expected {expected} input labels, got {actual}.")]
+    LabelCount { expected: usize, actual: usize },
 }
 
 #[derive(Error, Debug)]
@@ -26,8 +58,18 @@ pub enum EvalError {
     DigitMacReconstructionError,
     #[error("Missing y tables for field_mac_to_ec_mac.")]
     MissingYTablesError,
+    #[error("Input is the doubling point of field_mac_to_ec_mac replica {0}.")]
+    DoublingInput(usize),
     #[error("Missing global identifier in {0}")]
     MissingGID(&'static str),
     #[error("Missing DST in Encrypt<AesMiTCCR, Mac1>::decrypt")]
     MissingDST,
+    #[error("The table does not have the shape that garbling produces.")]
+    MalformedTable,
+    #[error("A converted MAC has no point on the curve.")]
+    InvalidMacPoint,
+    #[error("A pairing's Miller loop output is zero.")]
+    DegeneratePairing,
+    #[error(transparent)]
+    Nonce(#[from] NonceError),
 }

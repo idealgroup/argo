@@ -2,24 +2,23 @@
 
 use core::panic;
 
-use ark_bn254::{Bn254, Fq12, Fr, g1, g2};
-use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, pairing::Pairing, short_weierstrass::Affine};
+use ark_bn254::{Fq12, Fr, g1, g2};
+use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, short_weierstrass::Affine};
 use ark_ff::{AdditiveGroup, Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 #[cfg(test)]
 use ark_std::UniformRand;
-use ark_std::rand::rngs::StdRng;
 use num_bigint::BigInt;
+use rand_core::CryptoRngCore;
 
+#[cfg(test)]
+use crate::utils::group::checked_multi_pairing;
 use crate::{
     garble::groth16_verifier::{KAPPA_A, KAPPA_B},
     mac::{
         Mac, MacKey,
         ddh::{DDHMac, DDHMacKey},
-        endo::{
-            EndoMacFq12, EndoMacKeyFq12, EndoMacKeyG1, EndoScalar, IteratedEndoMacFq12,
-            IteratedEndoMacG1,
-        },
+        endo::{EndoMacKeyFq12, EndoMacKeyG1, EndoScalar, IteratedEndoMacFq12, IteratedEndoMacG1},
         group::GroupMac,
     },
     utils::{
@@ -43,7 +42,7 @@ impl Mac<Input> for InputMac {
     type Key = InputMacKey;
 
     #[cfg(test)]
-    fn random_input(rng: &mut StdRng) -> Input {
+    fn random_input(rng: &mut impl CryptoRngCore) -> Input {
         use ark_bn254::{G1Affine, G2Affine};
 
         (G1Affine::rand(rng), G2Affine::rand(rng))
@@ -60,7 +59,7 @@ impl MacKey<Input, InputMac> for InputMacKey {
         (self.0.decode(&mac.0), self.1.decode(&mac.1))
     }
 
-    fn random_key(_rng: &mut StdRng) -> Self {
+    fn random_key(_rng: &mut impl CryptoRngCore) -> Self {
         unimplemented!()
     }
 }
@@ -122,11 +121,9 @@ impl Table {
         &self,
         input: &Input,
         input_mac: &InputMac,
-    ) -> Result<(Output, OutputMac), crate::utils::error::EvalError> {
-        let (A, B) = input;
+    ) -> Result<OutputMac, crate::utils::error::EvalError> {
+        let (A, _) = input;
         let (A_mac, B_mac) = input_mac;
-
-        let output = Bn254::pairing(A, B);
 
         let S = GroupMac::<Affine<g1::Config>>(
             pow_n_lincomb(
@@ -136,13 +133,9 @@ impl Table {
             .into(),
         );
 
-        let output_mac = self.0.evaluate(A, &S, B_mac);
+        let output_mac = self.0.evaluate(A, &S, B_mac)?;
 
-        // This unwrap cannot fail since both `B_mac` and `self.0` are fixed
-        // arrays of size `KAPPA_B`.
-        let output_mac: [EndoMacFq12; KAPPA_B] = output_mac.try_into().unwrap_or_else(|_| panic!());
-
-        Ok((output.0, output_mac.into()))
+        Ok(output_mac.into())
     }
 }
 
@@ -224,7 +217,7 @@ fn test_generator() {
 #[test]
 fn test_pairing_circuit() {
     use crate::garble::keys::{a_ec_mac_key, b_mac_key};
-    use ark_std::rand::SeedableRng;
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
 
     for seed in 0..100 {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -245,12 +238,12 @@ fn test_pairing_circuit() {
 
         let input_mac = input_mac_key.encode(&input);
 
-        let output = Bn254::pairing(input.0, input.1).0;
+        let output = checked_multi_pairing([input.0], [input.1]).unwrap();
 
         let (circuit, output_mac_key) = Table::garble(*rs, &input_mac_key).unwrap();
         let expected_output_mac = output_mac_key.encode(&output);
 
-        let output_mac = circuit.evaluate(&input, &input_mac).unwrap().1;
+        let output_mac = circuit.evaluate(&input, &input_mac).unwrap();
 
         for (expected, mac) in expected_output_mac.iter().zip(output_mac.iter()) {
             assert!(expected == mac);
